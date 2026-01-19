@@ -151,6 +151,13 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
     log_user(user)
 
+    # 🧹 ленивая очистка протухших ссылок
+    with get_db() as db:
+        db.execute(
+            "DELETE FROM active_links WHERE expire < ?",
+            (int(time.time()),)
+        )
+
     chat_id = get_setting("private_chat_id")
     if not chat_id:
         await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
@@ -182,7 +189,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user_id, invite.invite_link, now + LINK_EXPIRE)
         )
 
-    msg = await safe_send(
+    await safe_send(
         update.message.reply_text,
         "✅ Ссылка готова! ⏳ 15 секунд.",
         reply_markup=InlineKeyboardMarkup([
@@ -190,42 +197,17 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-    context.job_queue.run_once(
-        cleanup_job,
-        when=LINK_EXPIRE,
-        data={
-            "chat_id": int(chat_id),
-            "invite_link": invite.invite_link,
-            "user_id": user_id,
-            "msg_chat": msg.chat.id,
-            "msg_id": msg.message_id
-        }
-    )
-
-async def cleanup_job(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    with get_db() as db:
-        db.execute(
-            "DELETE FROM active_links WHERE user_id = ?",
-            (job.data["user_id"],)
-        )
-    try:
-        await context.bot.revoke_chat_invite_link(
-            job.data["chat_id"], job.data["invite_link"]
-        )
-        await context.bot.delete_message(
-            job.data["msg_chat"], job.data["msg_id"]
-        )
-    except:
-        pass
-
 async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
-    await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
+    await safe_send(
+        update.message.reply_text,
+        f"🤖 Боты:\n{bots_list}" + user_commands_hint()
+    )
 
 # ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
+
     if member.new_chat_member.status not in ("member", "restricted"):
         return
 
@@ -247,8 +229,12 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    # ✅ валидный вход — чистим запись
     with get_db() as db:
-        db.execute("DELETE FROM active_links WHERE user_id = ?", (user_id,))
+        db.execute(
+            "DELETE FROM active_links WHERE user_id = ?",
+            (user_id,)
+        )
 
 # ================= ADMIN =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,7 +262,10 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat = get_setting("private_chat_id")
     bots_list = await get_bots_list()
-    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\nБоты:\n{bots_list}")
+    await safe_send(
+        update.message.reply_text,
+        f"📋 Чат: {chat}\n\nБоты:\n{bots_list}"
+    )
 
 # ================= MAIN =================
 def main():
@@ -293,7 +282,7 @@ def main():
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (SQLite)")
+    print("🚀 Бот запущен (SQLite, без JobQueue)")
     app.run_polling()
 
 if __name__ == "__main__":
