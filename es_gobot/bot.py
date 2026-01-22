@@ -3,8 +3,7 @@ import time
 import random
 import asyncio
 import sqlite3
-import psycopg
-
+import psycopg  # ← NEW
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,7 +16,6 @@ from telegram.error import Forbidden, TimedOut, NetworkError, RetryAfter
 
 # ================= CONFIG =================
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")  # ← NEW
@@ -36,7 +34,7 @@ if not BOT_TOKEN or ADMIN_ID == 0:
 # ================= DATABASE =================
 def get_db():
     if DATABASE_URL:
-        return psycopg.connect(DATABASE_URL, autocommit=True)
+        return psycopg.connect(DATABASE_URL, autocommit=True)  # PostgreSQL на Railway
     return sqlite3.connect(DB_FILE)
 
 def init_db():
@@ -88,7 +86,7 @@ def set_setting(key, value):
             "REPLACE INTO settings (key, value) VALUES (%s, %s)"
             if DATABASE_URL else
             "REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, str(value))
+            (str(key), str(value))
         )
 
 # ================= USERS (NEW) =================
@@ -113,13 +111,25 @@ def is_admin(user_id: int) -> bool:
 
 def log_user(user):
     user_id = user.id
+    username = user.username or "—"
+    first_name = user.first_name or "—"
+    last_name = user.last_name or "—"
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Сохраняем в базу
+    save_user(user)  # ← NEW
+
+    # Сохраняем в файл
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             if f"ID: {user_id} " in f.read():
                 return
 
     with open(USERS_FILE, "a", encoding="utf-8") as f:
-        f.write(f"ID: {user_id}\n")
+        f.write(
+            f"ID: {user_id} | Username: @{username} | "
+            f"Name: {first_name} {last_name} | First used: {timestamp}\n"
+        )
 
 async def safe_send(func, *args, **kwargs):
     for _ in range(3):
@@ -133,33 +143,51 @@ async def safe_send(func, *args, **kwargs):
     return None
 
 def user_commands_hint():
-    return "\n\n📌 Ваши команды:\n• /link\n• /bots"
+    return "\n\n📌 Ваши команды:\n• /link — получить персональную ссылку 🔑\n• /bots — список ботов 🤖"
+
+# ================= BOT STATUS =================
+async def get_bots_list() -> str:
+    with get_db() as db:
+        bots = [row[0] for row in db.execute("SELECT username FROM bots")]
+    return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    save_user(user)      # ← NEW
-    log_user(user)
+    log_user(user)  # ← Сохраняем в базу + файл
+
+    bots_list = await get_bots_list()
+
+    caption = (
+        f"👋 Привет, {user.first_name or 'друг'}!\n\n"
+        f"🤖 Доступные боты:\n{bots_list}\n\n"
+        "🔒 Здесь ты получаешь персональный доступ в приватный чат.\n\n"
+        "⚡ Как это работает:\n"
+        "1️⃣ Нажми /link 🚪\n"
+        "2️⃣ Ссылка активна 15 секунд ⏳\n"
+        "3️⃣ Повторный запрос — через 30 минут ⏰"
+    )
+
+    caption += (
+        "\n\n👑 Админ:\n• /setchat <id>\n• /addbot <bot>\n• /removebot <bot>\n• /settings"
+        if is_admin(user.id)
+        else user_commands_hint()
+    )
 
     await safe_send(
         context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
         chat_id=update.effective_chat.id,
         photo=WELCOME_IMAGE,
-        caption="👋 Привет! Нажми /link чтобы получить доступ."
+        caption=caption
     )
 
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    save_user(user)      # ← NEW
-    log_user(user)
+    user_id = str(user.id)
+    log_user(user)  # ← Сохраняем в базу + файл
 
     with get_db() as db:
-        db.execute(
-            "DELETE FROM active_links WHERE expire < %s"
-            if DATABASE_URL else
-            "DELETE FROM active_links WHERE expire < ?",
-            (int(time.time()),)
-        )
+        db.execute("DELETE FROM active_links WHERE expire < ?", (int(time.time()),))
 
     chat_id = get_setting("private_chat_id")
     if not chat_id:
@@ -168,50 +196,31 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now = int(time.time())
     with get_db() as db:
-        row = db.execute(
-            "SELECT timestamp FROM last_requests WHERE user_id = %s"
-            if DATABASE_URL else
-            "SELECT timestamp FROM last_requests WHERE user_id = ?",
-            (str(user.id),)
-        ).fetchone()
-
+        row = db.execute("SELECT timestamp FROM last_requests WHERE user_id = ?", (user_id,)).fetchone()
         if row and now - row[0] < LINK_COOLDOWN:
             mins = (LINK_COOLDOWN - (now - row[0])) // 60
             await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
             return
 
-    invite = await context.bot.create_chat_invite_link(
-        chat_id=int(chat_id),
-        expire_date=now + LINK_EXPIRE,
-        member_limit=1
-    )
+    invite = await context.bot.create_chat_invite_link(chat_id=int(chat_id), expire_date=now + LINK_EXPIRE, member_limit=1)
 
     with get_db() as db:
-        db.execute(
-            "REPLACE INTO last_requests VALUES (%s, %s)"
-            if DATABASE_URL else
-            "REPLACE INTO last_requests VALUES (?, ?)",
-            (str(user.id), now)
-        )
-        db.execute(
-            "REPLACE INTO active_links VALUES (%s, %s, %s)"
-            if DATABASE_URL else
-            "REPLACE INTO active_links VALUES (?, ?, ?)",
-            (str(user.id), invite.invite_link, now + LINK_EXPIRE)
-        )
+        db.execute("REPLACE INTO last_requests VALUES (?, ?)", (user_id, now))
+        db.execute("REPLACE INTO active_links VALUES (?, ?, ?)", (user_id, invite.invite_link, now + LINK_EXPIRE))
 
     await safe_send(
         update.message.reply_text,
         "✅ Ссылка готова! ⏳ 15 секунд.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]
-        ])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]])
     )
+
+async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bots_list = await get_bots_list()
+    await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
 
 # ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
-
     if member.new_chat_member.status not in ("member", "restricted"):
         return
 
@@ -220,12 +229,7 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
 
     with get_db() as db:
-        row = db.execute(
-            "SELECT invite_link, expire FROM active_links WHERE user_id = %s"
-            if DATABASE_URL else
-            "SELECT invite_link, expire FROM active_links WHERE user_id = ?",
-            (user_id,)
-        ).fetchone()
+        row = db.execute("SELECT invite_link, expire FROM active_links WHERE user_id = ?", (user_id,)).fetchone()
 
     if not row or now > row[1] or invite_link != row[0]:
         try:
@@ -236,33 +240,52 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     with get_db() as db:
-        db.execute(
-            "DELETE FROM active_links WHERE user_id = %s"
-            if DATABASE_URL else
-            "DELETE FROM active_links WHERE user_id = ?",
-            (user_id,)
-        )
+        db.execute("DELETE FROM active_links WHERE user_id = ?", (user_id,))
 
 # ================= ADMIN =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id) or not context.args:
         return
     set_setting("private_chat_id", context.args[0])
-    await update.message.reply_text("✅ Чат установлен")
+    await safe_send(update.message.reply_text, "✅ Чат установлен")
+
+async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
+    with get_db() as db:
+        db.execute("INSERT OR IGNORE INTO bots VALUES (?)", (context.args[0],))
+    await safe_send(update.message.reply_text, "✅ Бот добавлен")
+
+async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
+    with get_db() as db:
+        db.execute("DELETE FROM bots WHERE username = ?", (context.args[0],))
+    await safe_send(update.message.reply_text, "🗑 Бот удалён")
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    chat = get_setting("private_chat_id")
+    bots_list = await get_bots_list()
+    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\nБоты:\n{bots_list}")
 
 # ================= MAIN =================
 def main():
     init_db()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
+    app.add_handler(CommandHandler("bots", bots))
     app.add_handler(CommandHandler("setchat", setchat))
+    app.add_handler(CommandHandler("addbot", addbot))
+    app.add_handler(CommandHandler("removebot", removebot))
+    app.add_handler(CommandHandler("settings", settings))
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (Railway + PostgreSQL)")
-    app.run_polling(poll_interval=2, timeout=30)
+    print("🚀 Бот запущен (SQLite/PostgreSQL, с сохранением пользователей)")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
