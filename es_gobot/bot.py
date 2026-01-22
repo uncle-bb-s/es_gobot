@@ -4,6 +4,8 @@ import random
 import asyncio
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -20,10 +22,15 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 LINK_EXPIRE = 15
 LINK_COOLDOWN = 1800
+LINK_GRACE = 10
+
 WELCOME_IMAGE = "https://image2url.com/r2/default/images/1768635379388-0769fe79-f5b5-4926-97dc-a20e7be08fe0.jpg"
 
-if not BOT_TOKEN or ADMIN_ID == 0 or not DATABASE_URL:
-    raise RuntimeError("❌ BOT_TOKEN, ADMIN_ID или DATABASE_URL не заданы")
+if not BOT_TOKEN or not DATABASE_URL:
+    raise RuntimeError("❌ BOT_TOKEN или DATABASE_URL не заданы")
+
+if ADMIN_ID == 0:
+    print("⚠️ ADMIN_ID не задан")
 
 # ================= DATABASE =================
 def get_db():
@@ -36,39 +43,29 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT
-                )
-            """)
-            cur.execute("""
+                );
                 CREATE TABLE IF NOT EXISTS bots (
                     username TEXT PRIMARY KEY
-                )
-            """)
-            cur.execute("""
+                );
                 CREATE TABLE IF NOT EXISTS sites (
                     url TEXT PRIMARY KEY
-                )
-            """)
-            cur.execute("""
+                );
                 CREATE TABLE IF NOT EXISTS active_links (
                     user_id TEXT PRIMARY KEY,
                     invite_link TEXT,
                     expire INTEGER
-                )
-            """)
-            cur.execute("""
+                );
                 CREATE TABLE IF NOT EXISTS last_requests (
                     user_id TEXT PRIMARY KEY,
                     timestamp INTEGER
-                )
-            """)
-            cur.execute("""
+                );
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
                     last_name TEXT,
                     first_used TIMESTAMP
-                )
+                );
             """)
         db.commit()
 
@@ -98,7 +95,7 @@ def log_user(user):
     username = user.username or "—"
     first_name = user.first_name or "—"
     last_name = user.last_name or "—"
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.utcnow()
 
     with get_db() as db:
         with db.cursor() as cur:
@@ -180,12 +177,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else user_commands_hint()
         )
 
-        await safe_send(
-            context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
-            chat_id=update.effective_chat.id,
-            photo=WELCOME_IMAGE,
-            caption=caption
-        )
+        if WELCOME_IMAGE:
+            await safe_send(
+                context.bot.send_photo,
+                chat_id=update.effective_chat.id,
+                photo=WELCOME_IMAGE,
+                caption=caption
+            )
+        else:
+            await safe_send(update.message.reply_text, caption)
     else:
         caption = (
             f"🤖 Актуальные боты:\n{bots_list}\n\n"
@@ -209,7 +209,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("SELECT timestamp FROM last_requests WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
             if row and now - row["timestamp"] < LINK_COOLDOWN:
-                mins = (LINK_COOLDOWN - (now - row["timestamp"])) // 60
+                mins = max(1, (LINK_COOLDOWN - (now - row["timestamp"])) // 60)
                 await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
                 return
 
@@ -218,11 +218,15 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
         return
 
-    invite = await context.bot.create_chat_invite_link(
-        chat_id=int(chat_id),
-        expire_date=now + LINK_EXPIRE,
-        member_limit=1
-    )
+    try:
+        invite = await context.bot.create_chat_invite_link(
+            chat_id=int(chat_id),
+            expire_date=now + LINK_EXPIRE,
+            member_limit=1
+        )
+    except Forbidden:
+        await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
+        return
 
     with get_db() as db:
         with db.cursor() as cur:
@@ -262,7 +266,9 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = str(member.new_chat_member.user.id)
-    invite_link = member.invite_link.invite_link if member.invite_link else None
+    invite_link = None
+    if hasattr(member, "invite_link") and member.invite_link:
+        invite_link = member.invite_link.invite_link
     now = int(time.time())
 
     with get_db() as db:
@@ -270,7 +276,7 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("SELECT invite_link, expire FROM active_links WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
 
-    if not row or now > row["expire"] or invite_link != row["invite_link"]:
+    if not row or now > row["expire"] + LINK_GRACE or invite_link != row["invite_link"]:
         try:
             await context.bot.ban_chat_member(member.chat.id, int(user_id))
             await context.bot.unban_chat_member(member.chat.id, int(user_id))
@@ -283,7 +289,7 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("DELETE FROM active_links WHERE user_id = %s", (user_id,))
         db.commit()
 
-# ================= ADMIN (только ЛС) =================
+# ================= ADMIN =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
@@ -397,7 +403,7 @@ def main():
 
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (PostgreSQL, Railway)")
+    print("🚀 Бот запущен (PostgreSQL)")
     app.run_polling()
 
 if __name__ == "__main__":
