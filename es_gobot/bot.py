@@ -4,6 +4,7 @@ import random
 import asyncio
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,6 +24,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 LINK_EXPIRE = 15
 LINK_COOLDOWN = 1800
 LINK_GRACE = 10
+LINK_LOCK_SECONDS = 3
 
 WELCOME_IMAGE = "https://image2url.com/r2/default/images/1768635379388-0769fe79-f5b5-4926-97dc-a20e7be08fe0.jpg"
 
@@ -32,12 +34,18 @@ if not BOT_TOKEN or not DATABASE_URL:
 if ADMIN_ID == 0:
     print("⚠️ ADMIN_ID не задан")
 
+DB_POOL = None
+
 # ================= DATABASE =================
 def get_db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return DB_POOL.getconn()
+
+def release_db(conn):
+    DB_POOL.putconn(conn)
 
 def init_db():
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
@@ -66,18 +74,28 @@ def init_db():
                     last_name TEXT,
                     first_used TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS link_locks (
+                    user_id TEXT PRIMARY KEY,
+                    timestamp INTEGER
+                );
             """)
         db.commit()
+    finally:
+        release_db(db)
 
 def get_setting(key):
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
             row = cur.fetchone()
             return row["value"] if row else None
+    finally:
+        release_db(db)
 
 def set_setting(key, value):
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute(
                 "INSERT INTO settings (key, value) VALUES (%s, %s) "
@@ -85,6 +103,8 @@ def set_setting(key, value):
                 (key, str(value))
             )
         db.commit()
+    finally:
+        release_db(db)
 
 # ================= UTILS =================
 def is_admin(user_id: int) -> bool:
@@ -97,16 +117,27 @@ def log_user(user):
     last_name = user.last_name or "—"
     now = datetime.utcnow()
 
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
             if cur.fetchone():
                 return
+
+            cur.execute("""
+                SELECT 1 FROM users
+                WHERE username = %s AND user_id != %s
+            """, (username, user_id))
+            if cur.fetchone():
+                return
+
             cur.execute("""
                 INSERT INTO users (user_id, username, first_name, last_name, first_used)
                 VALUES (%s, %s, %s, %s, %s)
             """, (user_id, username, first_name, last_name, now))
         db.commit()
+    finally:
+        release_db(db)
 
 async def safe_send(func, *args, **kwargs):
     for _ in range(3):
@@ -129,18 +160,24 @@ def user_commands_hint():
 
 # ================= LISTS =================
 async def get_bots_list() -> str:
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("SELECT username FROM bots")
             bots = [row["username"] for row in cur.fetchall()]
-    return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
+        return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
+    finally:
+        release_db(db)
 
 async def get_sites_list() -> str:
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("SELECT url FROM sites")
             sites = [row["url"] for row in cur.fetchall()]
-    return "\n".join(f"🔗 {s}" for s in sites) if sites else "—"
+        return "\n".join(f"🔗 {s}" for s in sites) if sites else "—"
+    finally:
+        release_db(db)
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,7 +240,24 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user)
 
     now = int(time.time())
-    with get_db() as db:
+
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT timestamp FROM link_locks WHERE user_id=%s", (user_id,))
+            r = cur.fetchone()
+            if r and now - r["timestamp"] < LINK_LOCK_SECONDS:
+                return
+            cur.execute("""
+                INSERT INTO link_locks VALUES (%s,%s)
+                ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
+            """, (user_id, now))
+        db.commit()
+    finally:
+        release_db(db)
+
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("DELETE FROM active_links WHERE expire < %s", (now,))
             cur.execute("SELECT timestamp FROM last_requests WHERE user_id = %s", (user_id,))
@@ -212,6 +266,8 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mins = max(1, (LINK_COOLDOWN - (now - row["timestamp"])) // 60)
                 await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
                 return
+    finally:
+        release_db(db)
 
     chat_id = get_setting("private_chat_id")
     if not chat_id:
@@ -228,7 +284,8 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
         return
 
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute(
                 "INSERT INTO last_requests (user_id, timestamp) VALUES (%s, %s) "
@@ -242,6 +299,8 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (user_id, invite.invite_link, now + LINK_EXPIRE)
             )
         db.commit()
+    finally:
+        release_db(db)
 
     await safe_send(
         update.message.reply_text,
@@ -250,14 +309,6 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]]
         )
     )
-
-async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bots_list = await get_bots_list()
-    await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
-
-async def sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sites_list = await get_sites_list()
-    await safe_send(update.message.reply_text, f"🌐 Сайты:\n{sites_list}" + user_commands_hint())
 
 # ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -269,12 +320,16 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = None
     if hasattr(member, "invite_link") and member.invite_link:
         invite_link = member.invite_link.invite_link
+
     now = int(time.time())
 
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("SELECT invite_link, expire FROM active_links WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
+    finally:
+        release_db(db)
 
     if not row or now > row["expire"] + LINK_GRACE or invite_link != row["invite_link"]:
         try:
@@ -284,10 +339,14 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
+            cur.execute("UPDATE active_links SET expire = 0 WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM active_links WHERE user_id = %s", (user_id,))
         db.commit()
+    finally:
+        release_db(db)
 
 # ================= ADMIN =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -299,43 +358,55 @@ async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute(
                 "INSERT INTO bots (username) VALUES (%s) ON CONFLICT DO NOTHING",
                 (context.args[0],)
             )
         db.commit()
+    finally:
+        release_db(db)
     await safe_send(update.message.reply_text, "✅ Бот добавлен")
 
 async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("DELETE FROM bots WHERE username = %s", (context.args[0],))
         db.commit()
+    finally:
+        release_db(db)
     await safe_send(update.message.reply_text, "🗑 Бот удалён")
 
 async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute(
                 "INSERT INTO sites (url) VALUES (%s) ON CONFLICT DO NOTHING",
                 (context.args[0],)
             )
         db.commit()
+    finally:
+        release_db(db)
     await safe_send(update.message.reply_text, "✅ Сайт добавлен")
 
 async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("DELETE FROM sites WHERE url = %s", (context.args[0],))
         db.commit()
+    finally:
+        release_db(db)
     await safe_send(update.message.reply_text, "🗑 Сайт удалён")
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -358,10 +429,13 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = " ".join(context.args)
 
-    with get_db() as db:
+    db = get_db()
+    try:
         with db.cursor() as cur:
             cur.execute("SELECT user_id FROM users")
             users = [row["user_id"] for row in cur.fetchall()]
+    finally:
+        release_db(db)
 
     success = failed = 0
     batch_size = 50
@@ -385,7 +459,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= MAIN =================
 def main():
+    global DB_POOL
+    DB_POOL = SimpleConnectionPool(
+        minconn=1,
+        maxconn=10,
+        dsn=DATABASE_URL,
+        cursor_factory=RealDictCursor
+    )
+
     init_db()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -403,7 +486,7 @@ def main():
 
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (PostgreSQL)")
+    print("🚀 Бот запущен (Railway, PostgreSQL, pooled)")
     app.run_polling()
 
 if __name__ == "__main__":
