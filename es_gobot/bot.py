@@ -4,7 +4,6 @@ import random
 import asyncio
 import sqlite3
 import psycopg
-from psycopg.rows import dict_row
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,7 +20,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DATABASE_URL = os.getenv("DATABASE_URL")  # NEW
+DATABASE_URL = os.getenv("DATABASE_URL")  # ← NEW
 
 DB_FILE = "bot.db"
 USERS_FILE = "users.txt"
@@ -36,15 +35,9 @@ if not BOT_TOKEN or ADMIN_ID == 0:
 
 # ================= DATABASE =================
 def get_db():
-    # NEW: универсальное подключение
     if DATABASE_URL:
-        return psycopg.connect(
-            DATABASE_URL,
-            row_factory=dict_row,
-            autocommit=True
-        )
-    else:
-        return sqlite3.connect(DB_FILE)
+        return psycopg.connect(DATABASE_URL, autocommit=True)
+    return sqlite3.connect(DB_FILE)
 
 def init_db():
     with get_db() as db:
@@ -72,7 +65,7 @@ def init_db():
                 timestamp INTEGER
             )
         """)
-        # NEW: таблица пользователей
+        # ===== NEW =====
         db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
@@ -87,7 +80,7 @@ def get_setting(key):
             "SELECT value FROM settings WHERE key = ?",
             (key,)
         ).fetchone()
-        return row["value"] if row else None
+        return row[0] if row else None
 
 def set_setting(key, value):
     with get_db() as db:
@@ -98,8 +91,8 @@ def set_setting(key, value):
             (key, str(value))
         )
 
-# ================= USERS =================
-def save_user(user):  # NEW
+# ================= USERS (NEW) =================
+def save_user(user):
     with get_db() as db:
         db.execute(
             """
@@ -119,7 +112,6 @@ def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
 def log_user(user):
-    # оставляем как лог (не критично)
     user_id = user.id
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -141,32 +133,122 @@ async def safe_send(func, *args, **kwargs):
     return None
 
 def user_commands_hint():
-    return "\n\n📌 Команды:\n• /link\n• /bots"
+    return "\n\n📌 Ваши команды:\n• /link\n• /bots"
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    save_user(user)  # NEW
+    save_user(user)      # ← NEW
     log_user(user)
-
-    caption = (
-        f"👋 Привет, {user.first_name or 'друг'}!\n\n"
-        "Нажми /link чтобы получить доступ."
-    )
 
     await safe_send(
         context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
         chat_id=update.effective_chat.id,
         photo=WELCOME_IMAGE,
-        caption=caption
+        caption="👋 Привет! Нажми /link чтобы получить доступ."
     )
 
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    save_user(user)  # NEW
+    save_user(user)      # ← NEW
+    log_user(user)
 
-    # дальше ТВОЙ КОД БЕЗ ИЗМЕНЕНИЙ
-    # ...
+    with get_db() as db:
+        db.execute(
+            "DELETE FROM active_links WHERE expire < %s"
+            if DATABASE_URL else
+            "DELETE FROM active_links WHERE expire < ?",
+            (int(time.time()),)
+        )
+
+    chat_id = get_setting("private_chat_id")
+    if not chat_id:
+        await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
+        return
+
+    now = int(time.time())
+    with get_db() as db:
+        row = db.execute(
+            "SELECT timestamp FROM last_requests WHERE user_id = %s"
+            if DATABASE_URL else
+            "SELECT timestamp FROM last_requests WHERE user_id = ?",
+            (str(user.id),)
+        ).fetchone()
+
+        if row and now - row[0] < LINK_COOLDOWN:
+            mins = (LINK_COOLDOWN - (now - row[0])) // 60
+            await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
+            return
+
+    invite = await context.bot.create_chat_invite_link(
+        chat_id=int(chat_id),
+        expire_date=now + LINK_EXPIRE,
+        member_limit=1
+    )
+
+    with get_db() as db:
+        db.execute(
+            "REPLACE INTO last_requests VALUES (%s, %s)"
+            if DATABASE_URL else
+            "REPLACE INTO last_requests VALUES (?, ?)",
+            (str(user.id), now)
+        )
+        db.execute(
+            "REPLACE INTO active_links VALUES (%s, %s, %s)"
+            if DATABASE_URL else
+            "REPLACE INTO active_links VALUES (?, ?, ?)",
+            (str(user.id), invite.invite_link, now + LINK_EXPIRE)
+        )
+
+    await safe_send(
+        update.message.reply_text,
+        "✅ Ссылка готова! ⏳ 15 секунд.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]
+        ])
+    )
+
+# ================= ANTI-SLIV =================
+async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = update.chat_member
+
+    if member.new_chat_member.status not in ("member", "restricted"):
+        return
+
+    user_id = str(member.new_chat_member.user.id)
+    invite_link = member.invite_link.invite_link if member.invite_link else None
+    now = int(time.time())
+
+    with get_db() as db:
+        row = db.execute(
+            "SELECT invite_link, expire FROM active_links WHERE user_id = %s"
+            if DATABASE_URL else
+            "SELECT invite_link, expire FROM active_links WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+
+    if not row or now > row[1] or invite_link != row[0]:
+        try:
+            await context.bot.ban_chat_member(member.chat.id, int(user_id))
+            await context.bot.unban_chat_member(member.chat.id, int(user_id))
+        except:
+            pass
+        return
+
+    with get_db() as db:
+        db.execute(
+            "DELETE FROM active_links WHERE user_id = %s"
+            if DATABASE_URL else
+            "DELETE FROM active_links WHERE user_id = ?",
+            (user_id,)
+        )
+
+# ================= ADMIN =================
+async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
+    set_setting("private_chat_id", context.args[0])
+    await update.message.reply_text("✅ Чат установлен")
 
 # ================= MAIN =================
 def main():
@@ -176,14 +258,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
+    app.add_handler(CommandHandler("setchat", setchat))
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (Postgres + Railway)")
-    app.run_polling(
-        poll_interval=2,
-        timeout=30,
-        drop_pending_updates=True
-    )
+    print("🚀 Бот запущен (Railway + PostgreSQL)")
+    app.run_polling(poll_interval=2, timeout=30)
 
 if __name__ == "__main__":
     main()
