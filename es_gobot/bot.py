@@ -10,6 +10,8 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     ChatMemberHandler,
+    MessageHandler,
+    filters,
 )
 from telegram.error import Forbidden, TimedOut, NetworkError, RetryAfter
 
@@ -145,7 +147,7 @@ async def get_sites_list() -> str:
             sites = [row["url"] for row in cur.fetchall()]
     return "\n".join(f"🔗 {s}" for s in sites) if sites else "—"
 
-# ================= COMMANDS =================
+# ================= COMMANDS (PRIVATE ONLY) =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user(user)
@@ -153,53 +155,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     sites_list = await get_sites_list()
 
-    if update.effective_chat.type == "private":
-        # Полное приветствие в ЛС
-        caption = (
-            f"👋 Привет, {user.first_name or 'друг'}!\n\n"
-            f"🤖 Актуальные боты:\n{bots_list}\n\n"
-            f"🌐 Актуальные сайты:\n{sites_list}\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
-            "🔑 Получи персональную ссылку:\n"
-            "1️⃣ Нажми команду /link\n"
-            "2️⃣ Ссылка активна 15 секунд ⏳\n"
-            "3️⃣ Повтор — через 30 минут ⏰\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
-        )
+    caption = (
+        f"👋 Привет, {user.first_name or 'друг'}!\n\n"
+        f"🤖 Актуальные боты:\n{bots_list}\n\n"
+        f"🌐 Актуальные сайты:\n{sites_list}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
+        "🔑 Получи персональную ссылку:\n"
+        "1️⃣ Нажми команду /link\n"
+        "2️⃣ Ссылка активна 15 секунд ⏳\n"
+        "3️⃣ Повтор — через 30 минут ⏰\n"
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    )
 
-        caption += (
-            "\n\n👑 Админ:\n"
-            "• /setchat <id>\n"
-            "• /addbot <bot>\n"
-            "• /removebot <bot>\n"
-            "• /addsite <url>\n"
-            "• /removesite <url>\n"
-            "• /settings\n"
-            "• /broadcast <текст>"
-            if is_admin(user.id)
-            else user_commands_hint()
-        )
+    caption += (
+        "\n\n👑 Админ:\n"
+        "• /setchat <id>\n"
+        "• /addbot <bot>\n"
+        "• /removebot <bot>\n"
+        "• /addsite <url>\n"
+        "• /removesite <url>\n"
+        "• /settings\n"
+        "• /broadcast <текст>"
+        if is_admin(user.id)
+        else user_commands_hint()
+    )
 
-        await safe_send(
-            context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
-            chat_id=update.effective_chat.id,
-            photo=WELCOME_IMAGE,
-            caption=caption
-        )
-    else:
-        # Краткое сообщение в группах/каналах
-        caption = (
-            f"🤖 Актуальные боты:\n{bots_list}\n\n"
-            f"🌐 Актуальные сайты:\n{sites_list}\n\n"
-            "ℹ️ Для получения персональных ссылок и полного функционала — пишите боту в ЛС"
-        )
-        await safe_send(update.message.reply_text, caption)
+    await safe_send(
+        context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
+        chat_id=update.effective_chat.id,
+        photo=WELCOME_IMAGE,
+        caption=caption
+    )
 
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС бота.")
-
     user = update.effective_user
     user_id = str(user.id)
     log_user(user)
@@ -285,123 +274,45 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("DELETE FROM active_links WHERE user_id = %s", (user_id,))
         db.commit()
 
-# ================= ADMIN (только ЛС) =================
-async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
-        return
-    set_setting("private_chat_id", context.args[0])
-    await safe_send(update.message.reply_text, "✅ Чат установлен")
-
-async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
-        return
-    with get_db() as db:
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO bots (username) VALUES (%s) ON CONFLICT DO NOTHING",
-                (context.args[0],)
-            )
-        db.commit()
-    await safe_send(update.message.reply_text, "✅ Бот добавлен")
-
-async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
-        return
-    with get_db() as db:
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM bots WHERE username = %s", (context.args[0],))
-        db.commit()
-    await safe_send(update.message.reply_text, "🗑 Бот удалён")
-
-async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
-        return
-    with get_db() as db:
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO sites (url) VALUES (%s) ON CONFLICT DO NOTHING",
-                (context.args[0],)
-            )
-        db.commit()
-    await safe_send(update.message.reply_text, "✅ Сайт добавлен")
-
-async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
-        return
-    with get_db() as db:
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM sites WHERE url = %s", (context.args[0],))
-        db.commit()
-    await safe_send(update.message.reply_text, "🗑 Сайт удалён")
-
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
-        return
-    chat = get_setting("private_chat_id")
-    bots_list = await get_bots_list()
-    sites_list = await get_sites_list()
-    await safe_send(
-        update.message.reply_text,
-        f"📋 Чат: {chat}\n\n🤖 Боты:\n{bots_list}\n\n🌐 Сайты:\n{sites_list}"
-    )
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
-        return await safe_send(update.message.reply_text, "❌ Только админ.")
-
-    if not context.args:
-        return await safe_send(update.message.reply_text, "❌ /broadcast <текст>")
-
-    text = " ".join(context.args)
-
-    with get_db() as db:
-        with db.cursor() as cur:
-            cur.execute("SELECT user_id FROM users")
-            users = [row["user_id"] for row in cur.fetchall()]
-
-    success = failed = 0
-    batch_size = 50
-
-    for i in range(0, len(users), batch_size):
-        batch = users[i:i + batch_size]
-        tasks = [
-            safe_send(context.bot.send_message, chat_id=int(uid), text=text)
-            for uid in batch
-        ]
-        results = await asyncio.gather(*tasks)
-        for r in results:
-            success += 1 if r else 0
-            failed += 0 if r else 1
-        await asyncio.sleep(1)
-
-    await safe_send(
-        update.message.reply_text,
-        f"✅ Рассылка завершена!\nДоставлено: {success}\nНе доставлено: {failed}"
-    )
+# ================= SILENT MODE =================
+async def silent_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.delete()
+    except:
+        pass
 
 # ================= MAIN =================
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # ЛС и группы
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("link", link))
-    app.add_handler(CommandHandler("bots", bots))
-    app.add_handler(CommandHandler("sites", sites))
+    # PRIVATE ONLY
+    app.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("link", link, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("bots", bots, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("sites", sites, filters=filters.ChatType.PRIVATE))
 
-    # Только ЛС и админ
-    app.add_handler(CommandHandler("setchat", setchat))
-    app.add_handler(CommandHandler("addbot", addbot))
-    app.add_handler(CommandHandler("removebot", removebot))
-    app.add_handler(CommandHandler("addsite", addsite))
-    app.add_handler(CommandHandler("removesite", removesite))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("setchat", setchat, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("addbot", addbot, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("removebot", removebot, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("addsite", addsite, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("removesite", removesite, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("settings", settings, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("broadcast", broadcast, filters=filters.ChatType.PRIVATE))
 
+    # DELETE COMMANDS OUTSIDE PRIVATE
+    app.add_handler(
+        MessageHandler(
+            filters.COMMAND & ~filters.ChatType.PRIVATE,
+            silent_delete
+        ),
+        group=0
+    )
+
+    # INVITE PROTECTION
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (PostgreSQL, Railway)")
+    print("🚀 Бот запущен (SILENT MODE, PostgreSQL, Railway)")
     app.run_polling()
 
 if __name__ == "__main__":
