@@ -126,7 +126,8 @@ def user_commands_hint():
     return (
         "\n\n📌 Ваши команды:\n"
         "• /link — получить персональную ссылку 🔑\n"
-        "• /bots — список ботов 🤖"
+        "• /bots — список ботов 🤖\n"
+        "• /sites — список актуальных сайтов 🌐"
     )
 
 # ================= LISTS =================
@@ -152,40 +153,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     sites_list = await get_sites_list()
 
-    caption = (
-        f"👋 Привет, {user.first_name or 'друг'}!\n\n"
-        f"🤖 Актуальные боты:\n{bots_list}\n\n"
-        f"🌐 Актуальные сайты:\n{sites_list}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
-        "🔑 Получи персональную ссылку:\n"
-        "1️⃣ Нажми команду /link\n"
-        "2️⃣ Ссылка активна 15 секунд ⏳\n"
-        "3️⃣ Повтор — через 30 минут ⏰\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
-    )
+    if update.effective_chat.type == "private":
+        # Полное приветствие в ЛС
+        caption = (
+            f"👋 Привет, {user.first_name or 'друг'}!\n\n"
+            f"🤖 Актуальные боты:\n{bots_list}\n\n"
+            f"🌐 Актуальные сайты:\n{sites_list}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
+            "🔑 Получи персональную ссылку:\n"
+            "1️⃣ Нажми команду /link\n"
+            "2️⃣ Ссылка активна 15 секунд ⏳\n"
+            "3️⃣ Повтор — через 30 минут ⏰\n"
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        )
 
-    caption += (
-        "\n\n👑 Админ:\n"
-        "• /setchat <id>\n"
-        "• /addbot <bot>\n"
-        "• /removebot <bot>\n"
-        "• /addsite <url>\n"
-        "• /removesite <url>\n"
-        "• /settings\n"
-        "• /broadcast <текст>"
-        if is_admin(user.id)
-        else user_commands_hint()
-    )
+        caption += (
+            "\n\n👑 Админ:\n"
+            "• /setchat <id>\n"
+            "• /addbot <bot>\n"
+            "• /removebot <bot>\n"
+            "• /addsite <url>\n"
+            "• /removesite <url>\n"
+            "• /settings\n"
+            "• /broadcast <текст>"
+            if is_admin(user.id)
+            else user_commands_hint()
+        )
 
-    await safe_send(
-        context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
-        chat_id=update.effective_chat.id,
-        photo=WELCOME_IMAGE,
-        caption=caption
-    )
+        await safe_send(
+            context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
+            chat_id=update.effective_chat.id,
+            photo=WELCOME_IMAGE,
+            caption=caption
+        )
+    else:
+        # Краткое сообщение в группах/каналах
+        caption = (
+            f"🤖 Актуальные боты:\n{bots_list}\n\n"
+            f"🌐 Актуальные сайты:\n{sites_list}\n\n"
+            "ℹ️ Для получения персональных ссылок и полного функционала — пишите боту в ЛС"
+        )
+        await safe_send(update.message.reply_text, caption)
 
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС бота.")
+
     user = update.effective_user
     user_id = str(user.id)
     log_user(user)
@@ -239,6 +253,10 @@ async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
 
+async def sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sites_list = await get_sites_list()
+    await safe_send(update.message.reply_text, f"🌐 Сайты:\n{sites_list}" + user_commands_hint())
+
 # ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
@@ -267,15 +285,15 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("DELETE FROM active_links WHERE user_id = %s", (user_id,))
         db.commit()
 
-# ================= ADMIN =================
+# ================= ADMIN (только ЛС) =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     set_setting("private_chat_id", context.args[0])
     await safe_send(update.message.reply_text, "✅ Чат установлен")
 
 async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     with get_db() as db:
         with db.cursor() as cur:
@@ -287,7 +305,7 @@ async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send(update.message.reply_text, "✅ Бот добавлен")
 
 async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     with get_db() as db:
         with db.cursor() as cur:
@@ -296,7 +314,7 @@ async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send(update.message.reply_text, "🗑 Бот удалён")
 
 async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     with get_db() as db:
         with db.cursor() as cur:
@@ -308,7 +326,7 @@ async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send(update.message.reply_text, "✅ Сайт добавлен")
 
 async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     with get_db() as db:
         with db.cursor() as cur:
@@ -317,7 +335,7 @@ async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send(update.message.reply_text, "🗑 Сайт удалён")
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
         return
     chat = get_setting("private_chat_id")
     bots_list = await get_bots_list()
@@ -327,9 +345,8 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📋 Чат: {chat}\n\n🤖 Боты:\n{bots_list}\n\n🌐 Сайты:\n{sites_list}"
     )
 
-# ================= ADMIN BROADCAST =================
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
         return await safe_send(update.message.reply_text, "❌ Только админ.")
 
     if not context.args:
@@ -367,9 +384,13 @@ def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # ЛС и группы
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("bots", bots))
+    app.add_handler(CommandHandler("sites", sites))
+
+    # Только ЛС и админ
     app.add_handler(CommandHandler("setchat", setchat))
     app.add_handler(CommandHandler("addbot", addbot))
     app.add_handler(CommandHandler("removebot", removebot))
@@ -377,6 +398,7 @@ def main():
     app.add_handler(CommandHandler("removesite", removesite))
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(CommandHandler("broadcast", broadcast))
+
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
     print("🚀 Бот запущен (PostgreSQL, Railway)")
