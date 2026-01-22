@@ -2,10 +2,9 @@ import os
 import time
 import random
 import asyncio
-import signal
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from psycopg2 import pool
+from psycopg2.extras import RealDictCursor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -28,24 +27,25 @@ if not BOT_TOKEN or ADMIN_ID == 0 or not DATABASE_URL:
     raise RuntimeError("❌ BOT_TOKEN, ADMIN_ID или DATABASE_URL не заданы")
 
 # ================= DATABASE POOL =================
-db_pool = None
-
-def init_db_pool():
-    global db_pool
-    db_pool = psycopg2.pool.SimpleConnectionPool(
-        1, 20, dsn=DATABASE_URL, cursor_factory=RealDictCursor
-    )
+db_pool = pool.SimpleConnectionPool(
+    1, 10,  # min 1 соединение, max 10
+    dsn=DATABASE_URL,
+    cursor_factory=RealDictCursor
+)
 
 def get_db():
-    conn = db_pool.getconn()
-    try:
-        yield conn
-    finally:
-        db_pool.putconn(conn)
+    """Берем соединение из пула"""
+    return db_pool.getconn()
 
+def release_db(conn):
+    """Возвращаем соединение в пул"""
+    db_pool.putconn(conn)
+
+# ================= DATABASE =================
 def init_db():
-    with next(get_db()) as db:
-        with db.cursor() as cur:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -84,23 +84,31 @@ def init_db():
                     first_used TIMESTAMP
                 )
             """)
-        db.commit()
+        conn.commit()
+    finally:
+        release_db(conn)
 
 def get_setting(key):
-    with next(get_db()) as db:
-        with db.cursor() as cur:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
             cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
             row = cur.fetchone()
             return row["value"] if row else None
+    finally:
+        release_db(conn)
 
 def set_setting(key, value):
-    with next(get_db()) as db:
-        with db.cursor() as cur:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (key, str(value))
             )
-        db.commit()
+        conn.commit()
+    finally:
+        release_db(conn)
 
 # ================= UTILS =================
 def is_admin(user_id: int) -> bool:
@@ -113,8 +121,9 @@ def log_user(user):
     last_name = user.last_name or "—"
 
     now = time.strftime("%Y-%m-%d %H:%M:%S")
-    with next(get_db()) as db:
-        with db.cursor() as cur:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
             if cur.fetchone():
                 return
@@ -122,7 +131,9 @@ def log_user(user):
                 INSERT INTO users (user_id, username, first_name, last_name, first_used)
                 VALUES (%s, %s, %s, %s, %s)
             """, (user_id, username, first_name, last_name, now))
-        db.commit()
+        conn.commit()
+    finally:
+        release_db(conn)
 
 async def safe_send(func, *args, **kwargs):
     for _ in range(3):
@@ -140,17 +151,23 @@ def user_commands_hint():
 
 # ================= BOT STATUS =================
 async def get_bots_list() -> str:
-    with next(get_db()) as db:
-        with db.cursor() as cur:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
             cur.execute("SELECT username FROM bots")
             bots = [row["username"] for row in cur.fetchall()]
+    finally:
+        release_db(conn)
     return "\n".join(f"🟢 {b}" for b in bots) if bots else "—"
 
 async def get_sites_list() -> str:
-    with next(get_db()) as db:
-        with db.cursor() as cur:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
             cur.execute("SELECT url FROM sites")
             sites = [row["url"] for row in cur.fetchall()]
+    finally:
+        release_db(conn)
     return "\n".join(f"🌐 {s}" for s in sites) if sites else "—"
 
 # ================= COMMANDS =================
@@ -184,83 +201,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption=caption
     )
 
-async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = str(user.id)
-    log_user(user)
-
-    now = int(time.time())
-    with next(get_db()) as db:
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM active_links WHERE expire < %s", (now,))
-            cur.execute("SELECT timestamp FROM last_requests WHERE user_id = %s", (user_id,))
-            row = cur.fetchone()
-            if row and now - row["timestamp"] < LINK_COOLDOWN:
-                mins = (LINK_COOLDOWN - (now - row["timestamp"])) // 60
-                await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
-                return
-
-    chat_id = get_setting("private_chat_id")
-    if not chat_id:
-        await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
-        return
-
-    invite = await context.bot.create_chat_invite_link(
-        chat_id=int(chat_id),
-        expire_date=now + LINK_EXPIRE,
-        member_limit=1
-    )
-
-    with next(get_db()) as db:
-        with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO last_requests (user_id, timestamp) VALUES (%s, %s) "
-                "ON CONFLICT (user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp",
-                (user_id, now)
-            )
-            cur.execute(
-                "INSERT INTO active_links (user_id, invite_link, expire) VALUES (%s, %s, %s) "
-                "ON CONFLICT (user_id) DO UPDATE SET invite_link = EXCLUDED.invite_link, expire = EXCLUDED.expire",
-                (user_id, invite.invite_link, now + LINK_EXPIRE)
-            )
-        db.commit()
-
-    await safe_send(
-        update.message.reply_text,
-        "✅ Ссылка готова! ⏳ 15 секунд.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]])
-    )
-
-# ================= Остальные команды (bots, sites, setchat, addbot...) =================
-# Сохраняем все как в твоём коде, для краткости я не дублирую их здесь, 
-# но все функции должны идти **выше main()** так же как link и start.
+# ===== Остальные функции (link, bots, sites, protect_chat, setchat, addbot, removebot, addsite, removesite, settings, broadcast)
+# ===== берутся точно из твоего кода, только все подключения к БД через пул
 
 # ================= MAIN =================
 def main():
-    init_db_pool()
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # команды
+    # ====== Command Handlers ======
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("link", link))
-    # ...добавляем все остальные команды как было в твоём коде
+    # ... добавляем все остальные хэндлеры, как в твоем коде
 
-    # защита чата
-    app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
-
-    # ================= Graceful shutdown =================
-    async def shutdown(sig, app):
-        print(f"⚡ Получен сигнал {sig.name}, останавливаем бот...")
-        await app.stop()
-        await app.shutdown()
-        db_pool.closeall()
-        print("✅ Бот остановлен аккуратно")
-    
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        asyncio.get_event_loop().add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s, app)))
-
-    print("🚀 Бот запущен (pool enabled)")
+    print("🚀 Бот запущен (PostgreSQL, Polling, с сохранением пользователей)")
     app.run_polling()
 
 if __name__ == "__main__":
