@@ -144,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     caption += (
-        "\n\n👑 Админ:\n• /setchat <id>\n• /addbot <bot>\n• /removebot <bot>\n• /settings"
+        "\n\n👑 Админ:\n• /setchat <id>\n• /addbot <bot>\n• /removebot <bot>\n• /settings\n• /broadcast <текст>"
         if is_admin(user.id)
         else user_commands_hint()
     )
@@ -259,6 +259,38 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\nБоты:\n{bots_list}")
 
+# ================= ADMIN BROADCAST (safe, batch) =================
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await safe_send(update.message.reply_text, "❌ Только админ может использовать эту команду.")
+    
+    if not context.args:
+        return await safe_send(update.message.reply_text, "❌ Укажи текст для рассылки: /broadcast <сообщение>")
+    
+    text = " ".join(context.args)
+
+    with get_db() as db:
+        with db.cursor() as cur:
+            cur.execute("SELECT user_id FROM users")
+            users = [row["user_id"] for row in cur.fetchall()]
+
+    success = 0
+    failed = 0
+    batch_size = 50  # количество пользователей в одном пакете
+
+    for i in range(0, len(users), batch_size):
+        batch = users[i:i + batch_size]
+        tasks = [safe_send(context.bot.send_message, chat_id=int(user_id), text=text) for user_id in batch]
+        results = await asyncio.gather(*tasks)
+        for r in results:
+            if r:
+                success += 1
+            else:
+                failed += 1
+        await asyncio.sleep(1)  # пауза между пакетами, безопасно для Telegram
+
+    await safe_send(update.message.reply_text, f"✅ Рассылка завершена!\nДоставлено: {success}\nНе доставлено: {failed}")
+
 # ================= MAIN =================
 def main():
     init_db()
@@ -271,6 +303,7 @@ def main():
     app.add_handler(CommandHandler("addbot", addbot))
     app.add_handler(CommandHandler("removebot", removebot))
     app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("broadcast", broadcast))  # новая команда
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
     print("🚀 Бот запущен (PostgreSQL, Polling, с сохранением пользователей)")
