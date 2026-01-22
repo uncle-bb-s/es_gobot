@@ -2,8 +2,8 @@ import os
 import time
 import random
 import asyncio
-import sqlite3
-import psycopg  # ← NEW
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,92 +18,74 @@ from telegram.error import Forbidden, TimedOut, NetworkError, RetryAfter
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DATABASE_URL = os.getenv("DATABASE_URL")  # ← NEW
-
-DB_FILE = "bot.db"
-USERS_FILE = "users.txt"
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL URL от Railway
+PORT = int(os.getenv("PORT", 8080))
+RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")  # твой HTTPS URL от Railway
 
 LINK_EXPIRE = 15
 LINK_COOLDOWN = 1800
 
 WELCOME_IMAGE = "https://image2url.com/r2/default/images/1768635379388-0769fe79-f5b5-4926-97dc-a20e7be08fe0.jpg"
 
-if not BOT_TOKEN or ADMIN_ID == 0:
-    raise RuntimeError("❌ BOT_TOKEN или ADMIN_ID не заданы")
+if not BOT_TOKEN or ADMIN_ID == 0 or not DATABASE_URL:
+    raise RuntimeError("❌ BOT_TOKEN, ADMIN_ID или DATABASE_URL не заданы")
 
 # ================= DATABASE =================
 def get_db():
-    if DATABASE_URL:
-        return psycopg.connect(DATABASE_URL, autocommit=True)  # PostgreSQL на Railway
-    return sqlite3.connect(DB_FILE)
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
     with get_db() as db:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS bots (
-                username TEXT PRIMARY KEY
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS active_links (
-                user_id TEXT PRIMARY KEY,
-                invite_link TEXT,
-                expire INTEGER
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS last_requests (
-                user_id TEXT PRIMARY KEY,
-                timestamp INTEGER
-            )
-        """)
-        # ===== NEW =====
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                first_seen INTEGER
-            )
-        """)
+        with db.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bots (
+                    username TEXT PRIMARY KEY
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS active_links (
+                    user_id TEXT PRIMARY KEY,
+                    invite_link TEXT,
+                    expire BIGINT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS last_requests (
+                    user_id TEXT PRIMARY KEY,
+                    timestamp BIGINT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    first_used TIMESTAMP
+                )
+            """)
 
 def get_setting(key):
     with get_db() as db:
-        row = db.execute(
-            "SELECT value FROM settings WHERE key = %s" if DATABASE_URL else
-            "SELECT value FROM settings WHERE key = ?",
-            (key,)
-        ).fetchone()
-        return row[0] if row else None
+        with db.cursor() as cur:
+            cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+            return row["value"] if row else None
 
 def set_setting(key, value):
     with get_db() as db:
-        db.execute(
-            "REPLACE INTO settings (key, value) VALUES (%s, %s)"
-            if DATABASE_URL else
-            "REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (str(key), str(value))
-        )
-
-# ================= USERS (NEW) =================
-def save_user(user):
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO users (user_id, first_seen)
-            VALUES (%s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-            """ if DATABASE_URL else
-            """
-            INSERT OR IGNORE INTO users (user_id, first_seen)
-            VALUES (?, ?)
-            """,
-            (str(user.id), int(time.time()))
-        )
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO settings (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, str(value))
+            )
 
 # ================= UTILS =================
 def is_admin(user_id: int) -> bool:
@@ -116,20 +98,14 @@ def log_user(user):
     last_name = user.last_name or "—"
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Сохраняем в базу
-    save_user(user)  # ← NEW
-
-    # Сохраняем в файл
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            if f"ID: {user_id} " in f.read():
-                return
-
-    with open(USERS_FILE, "a", encoding="utf-8") as f:
-        f.write(
-            f"ID: {user_id} | Username: @{username} | "
-            f"Name: {first_name} {last_name} | First used: {timestamp}\n"
-        )
+    with get_db() as db:
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (user_id, username, first_name, last_name, first_used) "
+                "VALUES (%s, %s, %s, %s, NOW()) "
+                "ON CONFLICT (user_id) DO NOTHING",
+                (user_id, username, first_name, last_name)
+            )
 
 async def safe_send(func, *args, **kwargs):
     for _ in range(3):
@@ -148,13 +124,15 @@ def user_commands_hint():
 # ================= BOT STATUS =================
 async def get_bots_list() -> str:
     with get_db() as db:
-        bots = [row[0] for row in db.execute("SELECT username FROM bots")]
+        with db.cursor() as cur:
+            cur.execute("SELECT username FROM bots")
+            bots = [row["username"] for row in cur.fetchall()]
     return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_user(user)  # ← Сохраняем в базу + файл
+    log_user(user)
 
     bots_list = await get_bots_list()
 
@@ -184,10 +162,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
-    log_user(user)  # ← Сохраняем в базу + файл
+    log_user(user)
 
     with get_db() as db:
-        db.execute("DELETE FROM active_links WHERE expire < ?", (int(time.time()),))
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM active_links WHERE expire < %s", (int(time.time()),))
 
     chat_id = get_setting("private_chat_id")
     if not chat_id:
@@ -196,17 +175,32 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now = int(time.time())
     with get_db() as db:
-        row = db.execute("SELECT timestamp FROM last_requests WHERE user_id = ?", (user_id,)).fetchone()
-        if row and now - row[0] < LINK_COOLDOWN:
-            mins = (LINK_COOLDOWN - (now - row[0])) // 60
-            await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
-            return
+        with db.cursor() as cur:
+            cur.execute("SELECT timestamp FROM last_requests WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            if row and now - row["timestamp"] < LINK_COOLDOWN:
+                mins = (LINK_COOLDOWN - (now - row["timestamp"])) // 60
+                await safe_send(update.message.reply_text, f"⏳ Повтори через {mins} мин.")
+                return
 
-    invite = await context.bot.create_chat_invite_link(chat_id=int(chat_id), expire_date=now + LINK_EXPIRE, member_limit=1)
+    invite = await context.bot.create_chat_invite_link(
+        chat_id=int(chat_id),
+        expire_date=now + LINK_EXPIRE,
+        member_limit=1
+    )
 
     with get_db() as db:
-        db.execute("REPLACE INTO last_requests VALUES (?, ?)", (user_id, now))
-        db.execute("REPLACE INTO active_links VALUES (?, ?, ?)", (user_id, invite.invite_link, now + LINK_EXPIRE))
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO last_requests (user_id, timestamp) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp",
+                (user_id, now)
+            )
+            cur.execute(
+                "INSERT INTO active_links (user_id, invite_link, expire) VALUES (%s, %s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET invite_link = EXCLUDED.invite_link, expire = EXCLUDED.expire",
+                (user_id, invite.invite_link, now + LINK_EXPIRE)
+            )
 
     await safe_send(
         update.message.reply_text,
@@ -221,6 +215,7 @@ async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
+
     if member.new_chat_member.status not in ("member", "restricted"):
         return
 
@@ -229,9 +224,11 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
 
     with get_db() as db:
-        row = db.execute("SELECT invite_link, expire FROM active_links WHERE user_id = ?", (user_id,)).fetchone()
+        with db.cursor() as cur:
+            cur.execute("SELECT invite_link, expire FROM active_links WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
 
-    if not row or now > row[1] or invite_link != row[0]:
+    if not row or now > row["expire"] or invite_link != row["invite_link"]:
         try:
             await context.bot.ban_chat_member(member.chat.id, int(user_id))
             await context.bot.unban_chat_member(member.chat.id, int(user_id))
@@ -240,7 +237,8 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     with get_db() as db:
-        db.execute("DELETE FROM active_links WHERE user_id = ?", (user_id,))
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM active_links WHERE user_id = %s", (user_id,))
 
 # ================= ADMIN =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,14 +251,16 @@ async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id) or not context.args:
         return
     with get_db() as db:
-        db.execute("INSERT OR IGNORE INTO bots VALUES (?)", (context.args[0],))
+        with db.cursor() as cur:
+            cur.execute("INSERT INTO bots (username) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
     await safe_send(update.message.reply_text, "✅ Бот добавлен")
 
 async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id) or not context.args:
         return
     with get_db() as db:
-        db.execute("DELETE FROM bots WHERE username = ?", (context.args[0],))
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM bots WHERE username = %s", (context.args[0],))
     await safe_send(update.message.reply_text, "🗑 Бот удалён")
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,6 +273,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN =================
 def main():
     init_db()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -284,8 +285,15 @@ def main():
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (SQLite/PostgreSQL, с сохранением пользователей)")
-    app.run_polling()
+    # ✅ Устанавливаем Webhook
+    app.bot.set_webhook(f"https://{RAILWAY_URL}/{BOT_TOKEN}")
+
+    print(f"🚀 Бот запущен на Webhook https://{RAILWAY_URL}/{BOT_TOKEN}")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"https://{RAILWAY_URL}/{BOT_TOKEN}"
+    )
 
 if __name__ == "__main__":
     main()
