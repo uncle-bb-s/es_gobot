@@ -44,6 +44,11 @@ def init_db():
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS sites (
+                    url TEXT PRIMARY KEY
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS active_links (
                     user_id TEXT PRIMARY KEY,
                     invite_link TEXT,
@@ -117,7 +122,7 @@ async def safe_send(func, *args, **kwargs):
     return None
 
 def user_commands_hint():
-    return "\n\n📌 Ваши команды:\n• /link — получить персональную ссылку 🔑\n• /bots — список ботов 🤖"
+    return "\n\n📌 Ваши команды:\n• /link — получить персональную ссылку 🔑\n• /bots — список ботов 🤖\n• /sites — актуальные сайты 🌐"
 
 # ================= BOT STATUS =================
 async def get_bots_list() -> str:
@@ -125,7 +130,14 @@ async def get_bots_list() -> str:
         with db.cursor() as cur:
             cur.execute("SELECT username FROM bots")
             bots = [row["username"] for row in cur.fetchall()]
-    return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
+    return "\n".join(f"🟢 {b}" for b in bots) if bots else "—"
+
+async def get_sites_list() -> str:
+    with get_db() as db:
+        with db.cursor() as cur:
+            cur.execute("SELECT url FROM sites")
+            sites = [row["url"] for row in cur.fetchall()]
+    return "\n".join(f"🌐 {s}" for s in sites) if sites else "—"
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -133,9 +145,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user)
 
     bots_list = await get_bots_list()
+    sites_list = await get_sites_list()
     caption = (
         f"👋 Привет, {user.first_name or 'друг'}!\n\n"
         f"🤖 Доступные боты:\n{bots_list}\n\n"
+        f"🌐 Актуальные сайты:\n{sites_list}\n\n"
         "🔒 Здесь ты получаешь персональный доступ в приватный чат.\n\n"
         "⚡ Как это работает:\n"
         "1️⃣ Нажми /link 🚪\n"
@@ -144,7 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     caption += (
-        "\n\n👑 Админ:\n• /setchat <id>\n• /addbot <bot>\n• /removebot <bot>\n• /settings\n• /broadcast <текст>"
+        "\n\n👑 Админ:\n• /setchat <id>\n• /addbot <bot>\n• /removebot <bot>\n• /addsite <url>\n• /removesite <url>\n• /settings\n• /broadcast <текст>"
         if is_admin(user.id)
         else user_commands_hint()
     )
@@ -199,6 +213,10 @@ async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
 
+async def sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sites_list = await get_sites_list()
+    await safe_send(update.message.reply_text, f"🌐 Актуальные сайты:\n{sites_list}" + user_commands_hint())
+
 # ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
@@ -252,12 +270,31 @@ async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
     await safe_send(update.message.reply_text, "🗑 Бот удалён")
 
+async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
+    with get_db() as db:
+        with db.cursor() as cur:
+            cur.execute("INSERT INTO sites (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+        db.commit()
+    await safe_send(update.message.reply_text, "✅ Сайт добавлен")
+
+async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
+    with get_db() as db:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM sites WHERE url = %s", (context.args[0],))
+        db.commit()
+    await safe_send(update.message.reply_text, "🗑 Сайт удалён")
+
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     chat = get_setting("private_chat_id")
     bots_list = await get_bots_list()
-    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\nБоты:\n{bots_list}")
+    sites_list = await get_sites_list()
+    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\n🤖 Боты:\n{bots_list}\n\n🌐 Сайты:\n{sites_list}")
 
 # ================= ADMIN BROADCAST (safe, batch) =================
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -299,11 +336,14 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("bots", bots))
+    app.add_handler(CommandHandler("sites", sites))
     app.add_handler(CommandHandler("setchat", setchat))
     app.add_handler(CommandHandler("addbot", addbot))
     app.add_handler(CommandHandler("removebot", removebot))
+    app.add_handler(CommandHandler("addsite", addsite))
+    app.add_handler(CommandHandler("removesite", removesite))
     app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("broadcast", broadcast))  # новая команда
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
     print("🚀 Бот запущен (PostgreSQL, Polling, с сохранением пользователей)")
