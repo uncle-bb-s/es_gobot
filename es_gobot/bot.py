@@ -27,7 +27,9 @@ if not BOT_TOKEN or ADMIN_ID == 0 or not DATABASE_URL:
     raise RuntimeError("❌ BOT_TOKEN, ADMIN_ID или DATABASE_URL не заданы")
 
 # ================= DATABASE =================
-db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL, cursor_factory=RealDictCursor)
+db_pool = pool.SimpleConnectionPool(
+    1, 10, dsn=DATABASE_URL, cursor_factory=RealDictCursor
+)
 
 def get_db():
     return db_pool.getconn()
@@ -97,7 +99,8 @@ def set_setting(key, value):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                "INSERT INTO settings (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (key, str(value))
             )
         conn.commit()
@@ -150,22 +153,19 @@ async def get_bots_list() -> str:
         with conn.cursor() as cur:
             cur.execute("SELECT username FROM bots")
             bots = [row["username"] for row in cur.fetchall()]
-        return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
     finally:
         release_db(conn)
+    return "\n".join(f"🟢 онлайн — {b}" for b in bots) if bots else "—"
 
 async def get_sites_list() -> str:
     conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT name, url FROM sites")
-            sites = cur.fetchall()
-        if not sites:
-            return "—"
-        lines = [f"🌐 {row['name']}: [Перейти]({row['url']})" for row in sites]
-        return "\n".join(lines)
+            sites = [f"🌐 {row['name']} — {row['url']}" for row in cur.fetchall()]
     finally:
         release_db(conn)
+    return "\n".join(sites) if sites else "—"
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -191,16 +191,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else user_commands_hint()
     )
 
-    await safe_send(
-        context.bot.send_photo if WELCOME_IMAGE else update.message.reply_text,
-        chat_id=update.effective_chat.id,
-        photo=WELCOME_IMAGE,
-        caption=caption,
-        parse_mode="Markdown",
-        disable_web_page_preview=False
-    )
+    if WELCOME_IMAGE:
+        await safe_send(
+            context.bot.send_photo,
+            chat_id=update.effective_chat.id,
+            photo=WELCOME_IMAGE,
+            caption=caption
+        )
+    else:
+        await safe_send(update.message.reply_text, caption)
 
-# ================= LINK =================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
@@ -234,8 +234,16 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO last_requests (user_id, timestamp) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp", (user_id, now))
-            cur.execute("INSERT INTO active_links (user_id, invite_link, expire) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET invite_link = EXCLUDED.invite_link, expire = EXCLUDED.expire", (user_id, invite.invite_link, now + LINK_EXPIRE))
+            cur.execute(
+                "INSERT INTO last_requests (user_id, timestamp) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp",
+                (user_id, now)
+            )
+            cur.execute(
+                "INSERT INTO active_links (user_id, invite_link, expire) VALUES (%s, %s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET invite_link = EXCLUDED.invite_link, expire = EXCLUDED.expire",
+                (user_id, invite.invite_link, now + LINK_EXPIRE)
+            )
         conn.commit()
     finally:
         release_db(conn)
@@ -246,7 +254,6 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]])
     )
 
-# ================= BOTS =================
 async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
@@ -321,8 +328,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat = get_setting("private_chat_id")
     bots_list = await get_bots_list()
-    sites_list = await get_sites_list()
-    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\nБоты:\n{bots_list}\n\nСайты:\n{sites_list}")
+    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\nБоты:\n{bots_list}")
 
 # ================= ADMIN BROADCAST (safe, batch) =================
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,7 +350,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     success = 0
     failed = 0
-    batch_size = 50  # количество пользователей в одном пакете
+    batch_size = 50
 
     for i in range(0, len(users), batch_size):
         batch = users[i:i + batch_size]
@@ -355,7 +361,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 success += 1
             else:
                 failed += 1
-        await asyncio.sleep(1)  # пауза между пакетами, безопасно для Telegram
+        await asyncio.sleep(1)
 
     await safe_send(update.message.reply_text, f"✅ Рассылка завершена!\nДоставлено: {success}\nНе доставлено: {failed}")
 
