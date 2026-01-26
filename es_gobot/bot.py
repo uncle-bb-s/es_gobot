@@ -31,9 +31,6 @@ WELCOME_IMAGE = "https://image2url.com/r2/default/images/1768635379388-0769fe79-
 if not BOT_TOKEN or not DATABASE_URL:
     raise RuntimeError("❌ BOT_TOKEN или DATABASE_URL не заданы")
 
-if ADMIN_ID == 0:
-    print("⚠️ ADMIN_ID не задан")
-
 DB_POOL = None
 
 # ================= DATABASE =================
@@ -92,6 +89,7 @@ def init_db():
     finally:
         release_db(db)
 
+# ================= SETTINGS =================
 def get_setting(key):
     db = get_db()
     try:
@@ -118,6 +116,13 @@ def set_setting(key, value):
 # ================= UTILS =================
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
+
+def user_commands_hint():
+    return (
+        "\n\n📌 Ваши команды:\n"
+        "• /link — доступ в приват 🔑\n"
+        "• /info — вся информация ℹ️"
+    )
 
 def log_user(user):
     user_id = str(user.id)
@@ -191,8 +196,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Нажми команду /link\n"
         "2️⃣ Ссылка активна 15 секунд ⏳\n"
         "3️⃣ Повтор — через 30 минут ⏰\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "ℹ️ /info — вся информация"
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    caption += (
+        "\n\n👑 Админ-команды:\n"
+        "• /setchat <id>\n"
+        "• /addbot <bot>\n"
+        "• /removebot <bot>\n"
+        "• /addsite <url>\n"
+        "• /removesite <url>\n"
+        "• /addprice <url>\n"
+        "• /removeprice <url>\n"
+        "• /addcontact <url>\n"
+        "• /removecontact <url>\n"
+        "• /addjob <url>\n"
+        "• /removejob <url>\n"
+        "• /settings\n"
+        "• /broadcast <текст>"
+        if is_admin(user.id)
+        else user_commands_hint()
     )
 
     if WELCOME_IMAGE:
@@ -218,7 +241,7 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= LINK =================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС.")
+        return await safe_send(update.message.reply_text, "❌ Только в ЛС.")
 
     user = update.effective_user
     user_id = str(user.id)
@@ -242,7 +265,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = get_setting("private_chat_id")
     if not chat_id:
-        return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
+        return await safe_send(update.message.reply_text, "❌ Чат не настроен.")
 
     invite = await context.bot.create_chat_invite_link(
         chat_id=int(chat_id),
@@ -304,37 +327,6 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         release_db(db)
 
-# ================= ADMIN GENERIC =================
-async def add_generic(update, table):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not update.message.text.split()[1:]:
-        return
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                f"INSERT INTO {table} (url) VALUES (%s) ON CONFLICT DO NOTHING",
-                (update.message.text.split()[1],)
-            )
-        db.commit()
-    finally:
-        release_db(db)
-    await safe_send(update.message.reply_text, "✅ Добавлено")
-
-async def remove_generic(update, table):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not update.message.text.split()[1:]:
-        return
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM {table} WHERE url=%s",
-                (update.message.text.split()[1],)
-            )
-        db.commit()
-    finally:
-        release_db(db)
-    await safe_send(update.message.reply_text, "🗑 Удалено")
-
 # ================= MAIN =================
 def main():
     global DB_POOL
@@ -346,17 +338,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("info", info))
     app.add_handler(CommandHandler("link", link))
-
-    app.add_handler(CommandHandler("addprice", lambda u, c: add_generic(u, "price_channels")))
-    app.add_handler(CommandHandler("removeprice", lambda u, c: remove_generic(u, "price_channels")))
-    app.add_handler(CommandHandler("addcontact", lambda u, c: add_generic(u, "contact_channels")))
-    app.add_handler(CommandHandler("removecontact", lambda u, c: remove_generic(u, "contact_channels")))
-    app.add_handler(CommandHandler("addjob", lambda u, c: add_generic(u, "job_channels")))
-    app.add_handler(CommandHandler("removejob", lambda u, c: remove_generic(u, "job_channels")))
-
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (Railway, final)")
+    print("🚀 Бот запущен (final-final)")
     app.run_polling()
 
 if __name__ == "__main__":
