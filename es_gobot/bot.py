@@ -31,6 +31,9 @@ WELCOME_IMAGE = "https://image2url.com/r2/default/images/1768635379388-0769fe79-
 if not BOT_TOKEN or not DATABASE_URL:
     raise RuntimeError("❌ BOT_TOKEN или DATABASE_URL не заданы")
 
+if ADMIN_ID == 0:
+    print("⚠️ ADMIN_ID не задан")
+
 DB_POOL = None
 
 # ================= DATABASE =================
@@ -149,17 +152,7 @@ async def safe_send(func, *args, **kwargs):
             return None
     return None
 
-# ================= LIST HELPERS =================
-async def get_simple_list(table):
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute(f"SELECT url FROM {table}")
-            rows = cur.fetchall()
-        return "\n".join(f"🔗 {r['url']}" for r in rows) if rows else "—"
-    finally:
-        release_db(db)
-
+# ================= LISTS =================
 async def get_bots_list():
     db = get_db()
     try:
@@ -167,6 +160,16 @@ async def get_bots_list():
             cur.execute("SELECT username FROM bots")
             rows = cur.fetchall()
         return "\n".join(f"🟢 онлайн — {r['username']}" for r in rows) if rows else "—"
+    finally:
+        release_db(db)
+
+async def get_simple_list(table):
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(f"SELECT url FROM {table}")
+            rows = cur.fetchall()
+        return "\n".join(f"🔗 {r['url']}" for r in rows) if rows else "—"
     finally:
         release_db(db)
 
@@ -183,7 +186,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"☎️ Контакт-канал:\n{await get_simple_list('contact_channels')}\n\n"
         f"💼 Работа-канал:\n{await get_simple_list('job_channels')}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔑 /link — доступ в приват\n"
+        "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
+        "🔑 Получи персональную ссылку:\n"
+        "1️⃣ Нажми команду /link\n"
+        "2️⃣ Ссылка активна 15 секунд ⏳\n"
+        "3️⃣ Повтор — через 30 минут ⏰\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "ℹ️ /info — вся информация"
     )
 
@@ -207,10 +215,10 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await safe_send(update.message.reply_text, text)
 
-# ================= LINK (НЕ ТРОНУТО) =================
+# ================= LINK =================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        return await safe_send(update.message.reply_text, "❌ Только в ЛС")
+        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС.")
 
     user = update.effective_user
     user_id = str(user.id)
@@ -234,7 +242,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = get_setting("private_chat_id")
     if not chat_id:
-        return await safe_send(update.message.reply_text, "❌ Чат не настроен")
+        return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
 
     invite = await context.bot.create_chat_invite_link(
         chat_id=int(chat_id),
@@ -256,13 +264,13 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await safe_send(
         update.message.reply_text,
-        "✅ Ссылка активна 15 секунд",
+        "✅ Ссылка готова! ⏳ 15 секунд.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]]
         )
     )
 
-# ================= ANTI-SLIV (НЕ ТРОНУТО) =================
+# ================= ANTI-SLIV =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
     if member.new_chat_member.status not in ("member", "restricted"):
@@ -303,8 +311,10 @@ async def add_generic(update, table):
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute(f"INSERT INTO {table} (url) VALUES (%s) ON CONFLICT DO NOTHING",
-                        (update.message.text.split()[1],))
+            cur.execute(
+                f"INSERT INTO {table} (url) VALUES (%s) ON CONFLICT DO NOTHING",
+                (update.message.text.split()[1],)
+            )
         db.commit()
     finally:
         release_db(db)
@@ -316,8 +326,10 @@ async def remove_generic(update, table):
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute(f"DELETE FROM {table} WHERE url=%s",
-                        (update.message.text.split()[1],))
+            cur.execute(
+                f"DELETE FROM {table} WHERE url=%s",
+                (update.message.text.split()[1],)
+            )
         db.commit()
     finally:
         release_db(db)
@@ -344,7 +356,7 @@ def main():
 
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
-    print("🚀 Бот запущен (final)")
+    print("🚀 Бот запущен (Railway, final)")
     app.run_polling()
 
 if __name__ == "__main__":
