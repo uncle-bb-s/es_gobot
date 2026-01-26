@@ -268,16 +268,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    price_list = await get_price_list()
-    await safe_send(update.message.reply_text, f"📣 Прайс-канал:\n{price_list}" + user_commands_hint())
+    await safe_send(update.message.reply_text, f"📣 Прайс-канал:\n{await get_price_list()}" + user_commands_hint())
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact_list = await get_contact_list()
-    await safe_send(update.message.reply_text, f"📞 Контакты:\n{contact_list}" + user_commands_hint())
+    await safe_send(update.message.reply_text, f"📞 Контакты:\n{await get_contact_list()}" + user_commands_hint())
 
 async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    job_list = await get_job_list()
-    await safe_send(update.message.reply_text, f"💼 Работа:\n{job_list}" + user_commands_hint())
+    await safe_send(update.message.reply_text, f"💼 Работа:\n{await get_job_list()}" + user_commands_hint())
 
 # ================= ADMIN =================
 async def addprice(update, context):
