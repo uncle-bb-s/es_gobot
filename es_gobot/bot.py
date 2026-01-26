@@ -479,4 +479,29 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("bots", bots))
-    app.add_handler(Command
+    app.add_handler(CommandHandler("sites", sites))
+
+    # команды админа
+    app.add_handler(CommandHandler("setchat", setchat))
+    app.add_handler(CommandHandler("addbot", addbot))
+    app.add_handler(CommandHandler("removebot", removebot))
+    app.add_handler(CommandHandler("addsite", addsite))
+    app.add_handler(CommandHandler("removesite", removesite))
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+
+    # новые команды для каналов
+    app.add_handler(CommandHandler("addprice", addprice))
+    app.add_handler(CommandHandler("removeprice", removeprice))
+    app.add_handler(CommandHandler("addcontact", addcontact))
+    app.add_handler(CommandHandler("removecontact", removecontact))
+    app.add_handler(CommandHandler("addjob", addjob))
+    app.add_handler(CommandHandler("removejob", removejob))
+
+    app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
+
+    print("🚀 Бот запущен (Railway, pooled)")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
