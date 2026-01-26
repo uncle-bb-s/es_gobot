@@ -156,7 +156,7 @@ def user_commands_hint():
     return (
         "\n\n📌 Ваши команды:\n"
         "• /link — получить персональную ссылку 🔑\n"
-        "• /info — список всех ресурсов 🌐"
+        "• /info — информация о всех каналах и ботах 🌐"
     )
 
 # ================= LISTS =================
@@ -269,15 +269,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await safe_send(update.message.reply_text, caption)
 
+# ================= /link =================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # полностью оригинальный код команды /link
+    if update.effective_chat.type != "private":
+        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС бота.")
+
     user = update.effective_user
     user_id = str(user.id)
     log_user(user)
     now = int(time.time())
-
-    if update.effective_chat.type != "private":
-        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС бота.")
 
     db = get_db()
     try:
@@ -331,23 +331,24 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     )
 
+# ================= /info =================
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bots_list = await get_bots_list()
     sites_list = await get_sites_list()
     price_list = await get_price_list()
     contact_list = await get_contact_list()
     job_list = await get_job_list()
-    await safe_send(update.message.reply_text,
+
+    text = (
         f"🤖 Боты:\n{bots_list}\n\n"
         f"🌐 Сайты:\n{sites_list}\n\n"
         f"💰 Прайс-канал:\n{price_list}\n\n"
         f"📞 Контакт-канал:\n{contact_list}\n\n"
-        f"💼 Работа-канал:\n{job_list}"
-        + user_commands_hint()
+        f"💼 Работа-канал:\n{job_list}\n"
     )
+    await safe_send(update.message.reply_text, text + user_commands_hint())
 
-# ================= ADMIN =================
-# все админ-команды полностью копированы из оригинала и расширены на новые блоки
+# ================= ADMIN COMMANDS =================
 async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
@@ -402,7 +403,6 @@ async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
         release_db(db)
     await safe_send(update.message.reply_text, "🗑 Сайт удалён")
 
-# ======= новые админ-команды для 3 блоков ======
 async def addprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
@@ -475,12 +475,42 @@ async def removejob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         release_db(db)
     await safe_send(update.message.reply_text, "🗑 Работа-канал удалён")
 
-# ================= ANTI-SLIV =================
-async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    member = update.chat_member
-    if member.new_chat_member.status not in ("left", "kicked"):
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
         return
-    # можно добавить защиту от выхода/удаления
+    chat = get_setting("private_chat_id")
+    bots_list = await get_bots_list()
+    sites_list = await get_sites_list()
+    price_list = await get_price_list()
+    contact_list = await get_contact_list()
+    job_list = await get_job_list()
+        await safe_send(update.message.reply_text,
+        f"📋 Чат: {chat}\n\n"
+        f"🤖 Боты:\n{bots_list}\n\n"
+        f"🌐 Сайты:\n{sites_list}\n\n"
+        f"💰 Прайс-канал:\n{price_list}\n\n"
+        f"📞 Контакт-канал:\n{contact_list}\n\n"
+        f"💼 Работа-канал:\n{job_list}"
+    )
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        return await safe_send(update.message.reply_text, "❌ Укажите текст для рассылки")
+    text = " ".join(context.args)
+
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT user_id FROM users")
+            rows = cur.fetchall()
+        for row in rows:
+            user_id = int(row["user_id"])
+            await safe_send(context.bot.send_message, chat_id=user_id, text=text)
+    finally:
+        release_db(db)
+    await safe_send(update.message.reply_text, f"✅ Рассылка завершена, {len(rows)} пользователей уведомлено")
 
 # ================= MAIN =================
 def main():
@@ -490,12 +520,12 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # USER
+    # user commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("info", info))
 
-    # ADMIN
+    # admin commands
     app.add_handler(CommandHandler("setchat", setchat))
     app.add_handler(CommandHandler("addbot", addbot))
     app.add_handler(CommandHandler("removebot", removebot))
@@ -509,9 +539,6 @@ def main():
     app.add_handler(CommandHandler("removejob", removejob))
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(CommandHandler("broadcast", broadcast))
-
-    
-    app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
     print("✅ Bot started")
     app.run_polling()
