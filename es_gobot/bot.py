@@ -33,24 +33,29 @@ if ADMIN_ID == 0:
 DB_POOL = None
 
 # ================= DATABASE =================
-def get_db(): return DB_POOL.getconn()
-def release_db(conn): DB_POOL.putconn(conn)
+def get_db():
+    return DB_POOL.getconn()
+def release_db(conn):
+    DB_POOL.putconn(conn)
 
 def init_db():
     db = get_db()
     try:
         with db.cursor() as cur:
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings ( key TEXT PRIMARY KEY, value TEXT );
-            CREATE TABLE IF NOT EXISTS bots ( username TEXT PRIMARY KEY );
-            CREATE TABLE IF NOT EXISTS sites ( url TEXT PRIMARY KEY );
-            CREATE TABLE IF NOT EXISTS active_links ( user_id TEXT PRIMARY KEY, invite_link TEXT, expire INTEGER );
-            CREATE TABLE IF NOT EXISTS last_requests ( user_id TEXT PRIMARY KEY, timestamp INTEGER );
-            CREATE TABLE IF NOT EXISTS users ( user_id TEXT PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT, first_used TIMESTAMP );
-            CREATE TABLE IF NOT EXISTS link_locks ( user_id TEXT PRIMARY KEY, timestamp INTEGER );
-            CREATE TABLE IF NOT EXISTS channels ( name TEXT PRIMARY KEY, url TEXT );
+                CREATE TABLE IF NOT EXISTS settings ( key TEXT PRIMARY KEY, value TEXT );
+                CREATE TABLE IF NOT EXISTS bots ( username TEXT PRIMARY KEY );
+                CREATE TABLE IF NOT EXISTS sites ( url TEXT PRIMARY KEY );
+                CREATE TABLE IF NOT EXISTS active_links ( user_id TEXT PRIMARY KEY, invite_link TEXT, expire INTEGER );
+                CREATE TABLE IF NOT EXISTS last_requests ( user_id TEXT PRIMARY KEY, timestamp INTEGER );
+                CREATE TABLE IF NOT EXISTS users ( user_id TEXT PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT, first_used TIMESTAMP );
+                CREATE TABLE IF NOT EXISTS link_locks ( user_id TEXT PRIMARY KEY, timestamp INTEGER );
+                -- новые блоки
+                CREATE TABLE IF NOT EXISTS price_channel ( url TEXT PRIMARY KEY );
+                CREATE TABLE IF NOT EXISTS contact_channel ( url TEXT PRIMARY KEY );
+                CREATE TABLE IF NOT EXISTS job_channel ( url TEXT PRIMARY KEY );
             """)
-        db.commit()
+            db.commit()
     finally:
         release_db(db)
 
@@ -73,12 +78,13 @@ def set_setting(key, value):
                 "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
                 (key, str(value))
             )
-        db.commit()
+            db.commit()
     finally:
         release_db(db)
 
 # ================= UTILS =================
-def is_admin(user_id: int) -> bool: return user_id == ADMIN_ID
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
 def log_user(user):
     user_id = str(user.id)
@@ -90,12 +96,13 @@ def log_user(user):
     try:
         with db.cursor() as cur:
             cur.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
-            if cur.fetchone(): return
-            cur.execute(
-                "INSERT INTO users (user_id, username, first_name, last_name, first_used) VALUES (%s,%s,%s,%s,%s)",
-                (user_id, username, first_name, last_name, now)
-            )
-        db.commit()
+            if cur.fetchone():
+                return
+            cur.execute("""
+                INSERT INTO users (user_id, username, first_name, last_name, first_used)
+                VALUES (%s,%s,%s,%s,%s)
+            """, (user_id, username, first_name, last_name, now))
+            db.commit()
     finally:
         release_db(db)
 
@@ -115,7 +122,7 @@ def user_commands_hint():
         "\n\n📌 Ваши команды:\n"
         "• /link — получить персональную ссылку 🔑\n"
         "• /bots — список ботов 🤖\n"
-        "• /sites — список актуальных сайтов 🌐\n"
+        "• /sites — список актуальных сайтов 🌐"
     )
 
 # ================= LISTS =================
@@ -139,13 +146,34 @@ async def get_sites_list():
     finally:
         release_db(db)
 
-async def get_channel(name):
+# новые блоки
+async def get_price_channel():
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("SELECT url FROM channels WHERE name=%s", (name,))
+            cur.execute("SELECT url FROM price_channel")
             row = cur.fetchone()
-            return row["url"] if row else "—"
+            return f"💰 {row['url']}" if row else "—"
+    finally:
+        release_db(db)
+
+async def get_contact_channel():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT url FROM contact_channel")
+            row = cur.fetchone()
+            return f"📞 {row['url']}" if row else "—"
+    finally:
+        release_db(db)
+
+async def get_job_channel():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT url FROM job_channel")
+            row = cur.fetchone()
+            return f"💼 {row['url']}" if row else "—"
     finally:
         release_db(db)
 
@@ -155,19 +183,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user)
     bots_list = await get_bots_list()
     sites_list = await get_sites_list()
-    price_channel = await get_channel("Прайс-канал")
-    contact_channel = await get_channel("Контакт-канал")
-    work_channel = await get_channel("Работа-канал")
-
-    caption = ""
+    price = await get_price_channel()
+    contact = await get_contact_channel()
+    job = await get_job_channel()
+    
     if update.effective_chat.type == "private":
         caption = (
             f"👋 Привет, {user.first_name or 'друг'}!\n\n"
             f"🤖 Актуальные боты:\n{bots_list}\n\n"
             f"🌐 Актуальные сайты:\n{sites_list}\n\n"
-            f"💰 Прайс-канал: {price_channel}\n"
-            f"📞 Контакт-канал: {contact_channel}\n"
-            f"💼 Работа-канал: {work_channel}\n\n"
+            f"💰 Прайс-канал:\n{price}\n\n"
+            f"📞 Контакт-канал:\n{contact}\n\n"
+            f"💼 Работа-канал:\n{job}\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
             "🔑 Получи персональную ссылку:\n"
@@ -176,124 +203,122 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Повтор — через 30 минут ⏰\n"
             "━━━━━━━━━━━━━━━━━━━━━━"
         )
-        if is_admin(user.id):
-            caption += (
-                "\n\n👑 Админ:\n"
-                "• /setchat <id>\n"
-                "• /addbot <bot>\n"
-                "• /removebot <bot>\n"
-                "• /addsite <url>\n"
-                "• /removesite <url>\n"
-                "• /settings\n"
-                "• /broadcast <текст>\n"
-                "• /setchannel <название> <ссылка>"
-            )
-        else:
-            caption += user_commands_hint()
-
+        caption += (
+            "\n\n👑 Админ:\n"
+            "• /setchat <id>\n"
+            "• /addbot <bot>\n"
+            "• /removebot <bot>\n"
+            "• /addsite <url>\n"
+            "• /removesite <url>\n"
+            "• /addprice <url>\n"
+            "• /removeprice\n"
+            "• /addcontact <url>\n"
+            "• /removecontact\n"
+            "• /addjob <url>\n"
+            "• /removejob\n"
+            "• /settings\n"
+            "• /broadcast <текст>"
+            if is_admin(user.id)
+            else user_commands_hint()
+        )
         if WELCOME_IMAGE:
-            await safe_send(context.bot.send_photo, chat_id=update.effective_chat.id, photo=WELCOME_IMAGE, caption=caption)
+            await safe_send(
+                context.bot.send_photo,
+                chat_id=update.effective_chat.id,
+                photo=WELCOME_IMAGE,
+                caption=caption
+            )
         else:
             await safe_send(update.message.reply_text, caption)
     else:
         await safe_send(update.message.reply_text, caption)
 
-# ================= LINK COMMAND =================
-async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС бота.")
-
-    user = update.effective_user
-    user_id = str(user.id)
-    log_user(user)
-    now = int(time.time())
-
+# ================= ADMIN =================
+async def addprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("SELECT timestamp FROM link_locks WHERE user_id=%s", (user_id,))
-            r = cur.fetchone()
-            if r and now - r["timestamp"] < LINK_LOCK_SECONDS:
-                return
-            cur.execute(
-                "INSERT INTO link_locks (user_id, timestamp) VALUES (%s,%s) "
-                "ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp",
-                (user_id, now)
-            )
-        db.commit()
+            cur.execute("INSERT INTO price_channel (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            db.commit()
     finally:
         release_db(db)
+    await safe_send(update.message.reply_text, "✅ Прайс-канал установлен")
 
-    chat_id = get_setting("private_chat_id")
-    if not chat_id:
-        return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
-    try:
-        invite = await context.bot.create_chat_invite_link(chat_id=int(chat_id), expire_date=now + LINK_EXPIRE, member_limit=1)
-    except Forbidden:
-        return await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
-
+async def removeprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO last_requests (user_id, timestamp) VALUES (%s,%s) "
-                "ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp",
-                (user_id, now)
-            )
-            cur.execute(
-                "INSERT INTO active_links (user_id, invite_link, expire) VALUES (%s,%s,%s) "
-                "ON CONFLICT (user_id) DO UPDATE SET invite_link=EXCLUDED.invite_link, expire=EXCLUDED.expire",
-                (user_id, invite.invite_link, now + LINK_EXPIRE)
-            )
-        db.commit()
+            cur.execute("DELETE FROM price_channel")
+            db.commit()
     finally:
         release_db(db)
+    await safe_send(update.message.reply_text, "🗑 Прайс-канал удалён")
 
-    await safe_send(update.message.reply_text,
-                    "✅ Ссылка готова! ⏳ 15 секунд.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]]))
-
-# ================= ADMIN COMMANDS FOR CHANNELS =================
-async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or len(context.args) < 2:
-        return await safe_send(update.message.reply_text, "❌ Использование: /setchannel <название> <ссылка>")
-
-    name = context.args[0]
-    url = context.args[1]
-
+async def addcontact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute(
-                "INSERT INTO channels (name,url) VALUES (%s,%s) "
-                "ON CONFLICT (name) DO UPDATE SET url=EXCLUDED.url",
-                (name, url)
-            )
-        db.commit()
+            cur.execute("INSERT INTO contact_channel (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            db.commit()
     finally:
         release_db(db)
+    await safe_send(update.message.reply_text, "✅ Контакт-канал установлен")
 
-    await safe_send(update.message.reply_text, f"✅ Канал {name} установлен: {url}")
+async def removecontact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM contact_channel")
+            db.commit()
+    finally:
+        release_db(db)
+    await safe_send(update.message.reply_text, "🗑 Контакт-канал удалён")
 
-# ================= OTHER EXISTING COMMANDS =================
-# Здесь остаются все твои существующие команды:
-# /bots, /sites, /addbot, /removebot, /addsite, /removesite, /settings, /broadcast, protect_chat
+async def addjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) or not context.args:
+        return
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("INSERT INTO job_channel (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            db.commit()
+    finally:
+        release_db(db)
+    await safe_send(update.message.reply_text, "✅ Работа-канал установлен")
+
+async def removejob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM job_channel")
+            db.commit()
+    finally:
+        release_db(db)
+    await safe_send(update.message.reply_text, "🗑 Работа-канал удалён")
 
 # ================= MAIN =================
 def main():
     global DB_POOL
     DB_POOL = SimpleConnectionPool(1, 10, dsn=DATABASE_URL, cursor_factory=RealDictCursor)
     init_db()
-
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Команды пользователя
+    
+    # существующие команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("bots", bots))
     app.add_handler(CommandHandler("sites", sites))
-
-    # Команды админа
     app.add_handler(CommandHandler("setchat", setchat))
     app.add_handler(CommandHandler("addbot", addbot))
     app.add_handler(CommandHandler("removebot", removebot))
@@ -301,11 +326,16 @@ def main():
     app.add_handler(CommandHandler("removesite", removesite))
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("setchannel", setchannel))
-
-    # Защита от слива
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
-
+    
+    # новые команды
+    app.add_handler(CommandHandler("addprice", addprice))
+    app.add_handler(CommandHandler("removeprice", removeprice))
+    app.add_handler(CommandHandler("addcontact", addcontact))
+    app.add_handler(CommandHandler("removecontact", removecontact))
+    app.add_handler(CommandHandler("addjob", addjob))
+    app.add_handler(CommandHandler("removejob", removejob))
+    
     print("🚀 Бот запущен (Railway, pooled)")
     app.run_polling()
 
