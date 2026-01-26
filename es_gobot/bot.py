@@ -21,8 +21,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-LINK_EXPIRE = 15
-LINK_COOLDOWN = 1800
+LINK_EXPIRE = 15          # ссылка действует 15 секунд
+LINK_COOLDOWN = 1800      # повторно можно через 30 минут
 LINK_GRACE = 10
 LINK_LOCK_SECONDS = 3
 
@@ -249,6 +249,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await safe_send(update.message.reply_text, caption)
 
+# ========================= ИСПРАВЛЕННАЯ ФУНКЦИЯ /link =========================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return await safe_send(update.message.reply_text, "❌ Команда доступна только в ЛС.")
@@ -258,44 +259,40 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user)
     now = int(time.time())
 
-    # lock
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("SELECT timestamp FROM link_locks WHERE user_id=%s", (user_id,))
-            r = cur.fetchone()
-            if r and now - r["timestamp"] < LINK_LOCK_SECONDS:
-                return
+            # проверяем, когда последний раз выдавалась ссылка
+            cur.execute("SELECT timestamp FROM last_requests WHERE user_id=%s", (user_id,))
+            last = cur.fetchone()
+            if last and now - last["timestamp"] < LINK_COOLDOWN:
+                remaining = LINK_COOLDOWN - (now - last["timestamp"])
+                return await safe_send(
+                    update.message.reply_text,
+                    f"❌ Подождите {remaining // 60} мин {remaining % 60} сек перед повторным запросом."
+                )
+
+            chat_id = get_setting("private_chat_id")
+            if not chat_id:
+                return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
+
+            # создаем одноразовую ссылку на 15 секунд
+            try:
+                invite = await context.bot.create_chat_invite_link(
+                    chat_id=int(chat_id),
+                    expire_date=now + LINK_EXPIRE,
+                    member_limit=1
+                )
+            except Forbidden:
+                return await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
+
+            # сохраняем ссылку и время запроса
             cur.execute("""
-                INSERT INTO link_locks VALUES (%s,%s)
-                ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
-            """, (user_id, now))
-        db.commit()
-    finally:
-        release_db(db)
-
-    chat_id = get_setting("private_chat_id")
-    if not chat_id:
-        return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
-
-    try:
-        invite = await context.bot.create_chat_invite_link(
-            chat_id=int(chat_id),
-            expire_date=now + LINK_EXPIRE,
-            member_limit=1
-        )
-    except Forbidden:
-        return await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
-
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                INSERT INTO last_requests VALUES (%s,%s)
+                INSERT INTO last_requests(user_id, timestamp) VALUES (%s,%s)
                 ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
             """, (user_id, now))
             cur.execute("""
-                INSERT INTO active_links VALUES (%s,%s,%s)
+                INSERT INTO active_links(user_id, invite_link, expire) VALUES (%s,%s,%s)
                 ON CONFLICT (user_id) DO UPDATE
                 SET invite_link=EXCLUDED.invite_link, expire=EXCLUDED.expire
             """, (user_id, invite.invite_link, now + LINK_EXPIRE))
@@ -305,12 +302,13 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await safe_send(
         update.message.reply_text,
-        "✅ Ссылка готова! ⏳ 15 секунд.",
+        f"✅ Ссылка готова! ⏳ {LINK_EXPIRE} секунд.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]]
         )
     )
 
+# ========================= остальной код без изменений =========================
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
