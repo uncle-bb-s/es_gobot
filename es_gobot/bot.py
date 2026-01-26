@@ -225,42 +225,64 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact_list = await get_contact_list()
     job_list = await get_job_list()
 
-    caption = (
-        f"👋 Привет, {user.first_name or 'друг'}!\n\n"
-        f"🤖 Актуальные боты:\n{bots_list}\n\n"
-        f"🌐 Актуальные сайты:\n{sites_list}\n\n"
-        f"📣 Прайс-канал:\n{price_list}\n\n"
-        f"📞 Контакт-канал:\n{contact_list}\n\n"
-        f"💼 Работа-канал:\n{job_list}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🚪 ДОСТУП В ПРИВАТНЫЙ ЧАТ\n"
-        "🔑 /link"
-    )
+    if update.effective_chat.type == "private":
+        caption = (
+            f"👋 Привет, {user.first_name or 'друг'}!\n\n"
+            f"🤖 Актуальные боты:\n{bots_list}\n\n"
+            f"🌐 Актуальные сайты:\n{sites_list}\n\n"
+            f"📣 Прайс-канал:\n{price_list}\n\n"
+            f"📞 Контакт-канал:\n{contact_list}\n\n"
+            f"💼 Работа-канал:\n{job_list}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
+            "🔑 Получи персональную ссылку:\n"
+            "1️⃣ Нажми команду /link\n"
+            "2️⃣ Ссылка активна 15 секунд ⏳\n"
+            "3️⃣ Повтор — через 30 минут ⏰\n"
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        )
 
-    caption += user_commands_hint()
+        caption += (
+            "\n\n👑 Админ:\n"
+            "• /setchat <id>\n"
+            "• /addbot <bot>\n"
+            "• /removebot <bot>\n"
+            "• /addsite <url>\n"
+            "• /removesite <url>\n"
+            "• /addprice <url>\n"
+            "• /removeprice <url>\n"
+            "• /addcontact <url>\n"
+            "• /removecontact <url>\n"
+            "• /addjob <url>\n"
+            "• /removejob <url>\n"
+            "• /settings\n"
+            "• /broadcast <текст>"
+            if is_admin(user.id)
+            else user_commands_hint()
+        )
 
-    await safe_send(
-        context.bot.send_photo,
-        chat_id=update.effective_chat.id,
-        photo=WELCOME_IMAGE,
-        caption=caption
-    )
+        await safe_send(
+            context.bot.send_photo,
+            chat_id=update.effective_chat.id,
+            photo=WELCOME_IMAGE,
+            caption=caption
+        )
 
-# ================= ADMIN ADD / REMOVE =================
+# ================= ADMIN: PRICE =================
 async def addprice(update, context):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("INSERT INTO price_channels VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            cur.execute("INSERT INTO price_channels (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
     await safe_send(update.message.reply_text, "✅ Прайс-канал добавлен")
 
 async def removeprice(update, context):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
@@ -271,20 +293,21 @@ async def removeprice(update, context):
         release_db(db)
     await safe_send(update.message.reply_text, "🗑 Прайс-канал удалён")
 
+# ================= ADMIN: CONTACT =================
 async def addcontact(update, context):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("INSERT INTO contact_channels VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            cur.execute("INSERT INTO contact_channels (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
     await safe_send(update.message.reply_text, "✅ Контакт добавлен")
 
 async def removecontact(update, context):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
@@ -295,20 +318,21 @@ async def removecontact(update, context):
         release_db(db)
     await safe_send(update.message.reply_text, "🗑 Контакт удалён")
 
+# ================= ADMIN: JOB =================
 async def addjob(update, context):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("INSERT INTO job_channels VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            cur.execute("INSERT INTO job_channels (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
     await safe_send(update.message.reply_text, "✅ Работа добавлена")
 
 async def removejob(update, context):
-    if not is_admin(update.effective_user.id) or not context.args:
+    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
@@ -335,7 +359,7 @@ def main():
     app.add_handler(CommandHandler("addjob", addjob))
     app.add_handler(CommandHandler("removejob", removejob))
 
-    print("🚀 Бот запущен (Railway)")
+    print("🚀 Бот запущен (Railway, pooled)")
     app.run_polling()
 
 if __name__ == "__main__":
