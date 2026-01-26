@@ -58,6 +58,15 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS sites (
                     url TEXT PRIMARY KEY
                 );
+                CREATE TABLE IF NOT EXISTS price_channels (
+                    url TEXT PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS contact_channels (
+                    url TEXT PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS job_channels (
+                    url TEXT PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS active_links (
                     user_id TEXT PRIMARY KEY,
                     invite_link TEXT,
@@ -148,7 +157,10 @@ def user_commands_hint():
         "\n\n📌 Ваши команды:\n"
         "• /link — получить персональную ссылку 🔑\n"
         "• /bots — список ботов 🤖\n"
-        "• /sites — список актуальных сайтов 🌐"
+        "• /sites — список сайтов 🌐\n"
+        "• /price — прайс-канал 📣\n"
+        "• /contact — контакты 📞\n"
+        "• /jobs — работа 💼"
     )
 
 # ================= LISTS =================
@@ -172,6 +184,36 @@ async def get_sites_list():
     finally:
         release_db(db)
 
+async def get_price_list():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT url FROM price_channels")
+            rows = cur.fetchall()
+        return "\n".join(f"📣 {r['url']}" for r in rows) if rows else "—"
+    finally:
+        release_db(db)
+
+async def get_contact_list():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT url FROM contact_channels")
+            rows = cur.fetchall()
+        return "\n".join(f"📞 {r['url']}" for r in rows) if rows else "—"
+    finally:
+        release_db(db)
+
+async def get_job_list():
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT url FROM job_channels")
+            rows = cur.fetchall()
+        return "\n".join(f"💼 {r['url']}" for r in rows) if rows else "—"
+    finally:
+        release_db(db)
+
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -179,234 +221,103 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bots_list = await get_bots_list()
     sites_list = await get_sites_list()
+    price_list = await get_price_list()
+    contact_list = await get_contact_list()
+    job_list = await get_job_list()
 
-    if update.effective_chat.type == "private":
-        caption = (
-            f"👋 Привет, {user.first_name or 'друг'}!\n\n"
-            f"🤖 Актуальные боты:\n{bots_list}\n\n"
-            f"🌐 Актуальные сайты:\n{sites_list}\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🚪 **ДОСТУП В ПРИВАТНЫЙ ЧАТ**\n\n"
-            "🔑 Получи персональную ссылку:\n"
-            "1️⃣ Нажми команду /link\n"
-            "2️⃣ Ссылка активна 15 секунд ⏳\n"
-            "3️⃣ Повтор — через 30 минут ⏰\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
-        )
-
-        caption += (
-            "\n\n👑 Админ:\n"
-            "• /setchat <id>\n"
-            "• /addbot <bot>\n"
-            "• /removebot <bot>\n"
-            "• /addsite <url>\n"
-            "• /removesite <url>\n"
-            "• /settings\n"
-            "• /broadcast <текст>"
-            if is_admin(user.id)
-            else user_commands_hint()
-        )
-
-        if WELCOME_IMAGE:
-            await safe_send(
-                context.bot.send_photo,
-                chat_id=update.effective_chat.id,
-                photo=WELCOME_IMAGE,
-                caption=caption
-            )
-        else:
-            await safe_send(update.message.reply_text, caption)
-    else:
-        await safe_send(update.message.reply_text, caption)
-
-async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return await safe_send(update.message.reply_text, "❌ Эта команда доступна только в ЛС бота.")
-
-    user = update.effective_user
-    user_id = str(user.id)
-    log_user(user)
-    now = int(time.time())
-
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT timestamp FROM link_locks WHERE user_id=%s", (user_id,))
-            r = cur.fetchone()
-            if r and now - r["timestamp"] < LINK_LOCK_SECONDS:
-                return
-            cur.execute("""
-                INSERT INTO link_locks VALUES (%s,%s)
-                ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
-            """, (user_id, now))
-        db.commit()
-    finally:
-        release_db(db)
-
-    chat_id = get_setting("private_chat_id")
-    if not chat_id:
-        return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
-
-    try:
-        invite = await context.bot.create_chat_invite_link(
-            chat_id=int(chat_id),
-            expire_date=now + LINK_EXPIRE,
-            member_limit=1
-        )
-    except Forbidden:
-        return await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
-
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("""
-                INSERT INTO last_requests VALUES (%s,%s)
-                ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
-            """, (user_id, now))
-            cur.execute("""
-                INSERT INTO active_links VALUES (%s,%s,%s)
-                ON CONFLICT (user_id) DO UPDATE
-                SET invite_link=EXCLUDED.invite_link, expire=EXCLUDED.expire
-            """, (user_id, invite.invite_link, now + LINK_EXPIRE))
-        db.commit()
-    finally:
-        release_db(db)
-
-    await safe_send(
-        update.message.reply_text,
-        "✅ Ссылка готова! ⏳ 15 секунд.",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚪 Войти", url=invite.invite_link)]]
-        )
+    caption = (
+        f"👋 Привет, {user.first_name or 'друг'}!\n\n"
+        f"🤖 Актуальные боты:\n{bots_list}\n\n"
+        f"🌐 Актуальные сайты:\n{sites_list}\n\n"
+        f"📣 Прайс-канал:\n{price_list}\n\n"
+        f"📞 Контакт-канал:\n{contact_list}\n\n"
+        f"💼 Работа-канал:\n{job_list}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🚪 ДОСТУП В ПРИВАТНЫЙ ЧАТ\n"
+        "🔑 /link"
     )
 
-async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bots_list = await get_bots_list()
-    await safe_send(update.message.reply_text, f"🤖 Боты:\n{bots_list}" + user_commands_hint())
+    caption += user_commands_hint()
 
-async def sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sites_list = await get_sites_list()
-    await safe_send(update.message.reply_text, f"🌐 Сайты:\n{sites_list}" + user_commands_hint())
+    await safe_send(
+        context.bot.send_photo,
+        chat_id=update.effective_chat.id,
+        photo=WELCOME_IMAGE,
+        caption=caption
+    )
 
-# ================= ANTI-SLIV =================
-async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    member = update.chat_member
-    if member.new_chat_member.status not in ("member", "restricted"):
+# ================= ADMIN ADD / REMOVE =================
+async def addprice(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
         return
-
-    user_id = str(member.new_chat_member.user.id)
-    invite_link = getattr(member.invite_link, "invite_link", None)
-    now = int(time.time())
-
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("SELECT invite_link, expire FROM active_links WHERE user_id=%s", (user_id,))
-            row = cur.fetchone()
-    finally:
-        release_db(db)
-
-    if not row or invite_link != row["invite_link"] or now > row["expire"] + LINK_GRACE:
-        try:
-            await context.bot.ban_chat_member(member.chat.id, int(user_id))
-            await context.bot.unban_chat_member(member.chat.id, int(user_id))
-        except:
-            pass
-        return
-
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("DELETE FROM active_links WHERE user_id=%s", (user_id,))
+            cur.execute("INSERT INTO price_channels VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
+    await safe_send(update.message.reply_text, "✅ Прайс-канал добавлен")
 
-# ================= ADMIN =================
-async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
-        return
-    set_setting("private_chat_id", context.args[0])
-    await safe_send(update.message.reply_text, "✅ Чат установлен")
-
-async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
+async def removeprice(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("INSERT INTO bots (username) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            cur.execute("DELETE FROM price_channels WHERE url=%s", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
-    await safe_send(update.message.reply_text, "✅ Бот добавлен")
+    await safe_send(update.message.reply_text, "🗑 Прайс-канал удалён")
 
-async def removebot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
+async def addcontact(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("DELETE FROM bots WHERE username=%s", (context.args[0],))
+            cur.execute("INSERT INTO contact_channels VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
-    await safe_send(update.message.reply_text, "🗑 Бот удалён")
+    await safe_send(update.message.reply_text, "✅ Контакт добавлен")
 
-async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
+async def removecontact(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("INSERT INTO sites (url) VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
+            cur.execute("DELETE FROM contact_channels WHERE url=%s", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
-    await safe_send(update.message.reply_text, "✅ Сайт добавлен")
+    await safe_send(update.message.reply_text, "🗑 Контакт удалён")
 
-async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
+async def addjob(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
         return
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("DELETE FROM sites WHERE url=%s", (context.args[0],))
+            cur.execute("INSERT INTO job_channels VALUES (%s) ON CONFLICT DO NOTHING", (context.args[0],))
         db.commit()
     finally:
         release_db(db)
-    await safe_send(update.message.reply_text, "🗑 Сайт удалён")
+    await safe_send(update.message.reply_text, "✅ Работа добавлена")
 
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
+async def removejob(update, context):
+    if not is_admin(update.effective_user.id) or not context.args:
         return
-    chat = get_setting("private_chat_id")
-    bots_list = await get_bots_list()
-    sites_list = await get_sites_list()
-    await safe_send(update.message.reply_text, f"📋 Чат: {chat}\n\n🤖 Боты:\n{bots_list}\n\n🌐 Сайты:\n{sites_list}")
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or not is_admin(update.effective_user.id):
-        return await safe_send(update.message.reply_text, "❌ Только админ.")
-    if not context.args:
-        return await safe_send(update.message.reply_text, "❌ /broadcast <текст>")
-
-    text = " ".join(context.args)
-
     db = get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("SELECT user_id FROM users")
-            users = [row["user_id"] for row in cur.fetchall()]
+            cur.execute("DELETE FROM job_channels WHERE url=%s", (context.args[0],))
+        db.commit()
     finally:
         release_db(db)
-
-    for i in range(0, len(users), 50):
-        tasks = [safe_send(context.bot.send_message, chat_id=int(uid), text=text) for uid in users[i:i+50]]
-        await asyncio.gather(*tasks)
-        await asyncio.sleep(1)
-
-    await safe_send(update.message.reply_text, "✅ Рассылка завершена!")
+    await safe_send(update.message.reply_text, "🗑 Работа удалена")
 
 # ================= MAIN =================
 def main():
@@ -417,19 +328,14 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("link", link))
-    app.add_handler(CommandHandler("bots", bots))
-    app.add_handler(CommandHandler("sites", sites))
-    app.add_handler(CommandHandler("setchat", setchat))
-    app.add_handler(CommandHandler("addbot", addbot))
-    app.add_handler(CommandHandler("removebot", removebot))
-    app.add_handler(CommandHandler("addsite", addsite))
-    app.add_handler(CommandHandler("removesite", removesite))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(CommandHandler("addprice", addprice))
+    app.add_handler(CommandHandler("removeprice", removeprice))
+    app.add_handler(CommandHandler("addcontact", addcontact))
+    app.add_handler(CommandHandler("removecontact", removecontact))
+    app.add_handler(CommandHandler("addjob", addjob))
+    app.add_handler(CommandHandler("removejob", removejob))
 
-    print("🚀 Бот запущен (Railway, pooled)")
+    print("🚀 Бот запущен (Railway)")
     app.run_polling()
 
 if __name__ == "__main__":
