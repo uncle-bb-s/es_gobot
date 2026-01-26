@@ -132,7 +132,6 @@ def log_user(user):
             cur.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
             if cur.fetchone():
                 return
-
             cur.execute("""
                 INSERT INTO users (user_id, username, first_name, last_name, first_used)
                 VALUES (%s,%s,%s,%s,%s)
@@ -268,7 +267,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=caption
         )
 
-# ================= ADMIN: PRICE =================
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    price_list = await get_price_list()
+    await safe_send(update.message.reply_text, f"📣 Прайс-канал:\n{price_list}" + user_commands_hint())
+
+async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact_list = await get_contact_list()
+    await safe_send(update.message.reply_text, f"📞 Контакты:\n{contact_list}" + user_commands_hint())
+
+async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    job_list = await get_job_list()
+    await safe_send(update.message.reply_text, f"💼 Работа:\n{job_list}" + user_commands_hint())
+
+# ================= ADMIN =================
 async def addprice(update, context):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
@@ -293,7 +304,6 @@ async def removeprice(update, context):
         release_db(db)
     await safe_send(update.message.reply_text, "🗑 Прайс-канал удалён")
 
-# ================= ADMIN: CONTACT =================
 async def addcontact(update, context):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
@@ -318,7 +328,6 @@ async def removecontact(update, context):
         release_db(db)
     await safe_send(update.message.reply_text, "🗑 Контакт удалён")
 
-# ================= ADMIN: JOB =================
 async def addjob(update, context):
     if update.effective_chat.type != "private" or not is_admin(update.effective_user.id) or not context.args:
         return
@@ -352,6 +361,10 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("contact", contact))
+    app.add_handler(CommandHandler("jobs", jobs))
+
     app.add_handler(CommandHandler("addprice", addprice))
     app.add_handler(CommandHandler("removeprice", removeprice))
     app.add_handler(CommandHandler("addcontact", addcontact))
