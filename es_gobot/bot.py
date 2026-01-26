@@ -21,8 +21,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-LINK_EXPIRE = 15          # ссылка действует 15 секунд
-LINK_COOLDOWN = 1800      # повторно можно через 30 минут
+LINK_EXPIRE = 15
+LINK_COOLDOWN = 1800
 LINK_GRACE = 10
 LINK_LOCK_SECONDS = 3
 
@@ -193,7 +193,7 @@ async def get_job_list():
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        return
+        return  # только ЛС
 
     user = update.effective_user
     log_user(user)
@@ -249,7 +249,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await safe_send(update.message.reply_text, caption)
 
-# ========================= ИСПРАВЛЕННАЯ ФУНКЦИЯ /link =========================
+# ========================= /link =========================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return await safe_send(update.message.reply_text, "❌ Команда доступна только в ЛС.")
@@ -262,7 +262,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db()
     try:
         with db.cursor() as cur:
-            # проверяем последний запрос
+            # проверяем, когда последний раз выдавалась ссылка
             cur.execute("SELECT timestamp FROM last_requests WHERE user_id=%s", (user_id,))
             last = cur.fetchone()
             if last and now - last["timestamp"] < LINK_COOLDOWN:
@@ -272,12 +272,10 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"❌ Подождите {remaining // 60} мин {remaining % 60} сек перед повторным запросом."
                 )
 
-            # получаем приватный чат
             chat_id = get_setting("private_chat_id")
             if not chat_id:
                 return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
 
-            # создаем одноразовую ссылку на 15 секунд
             try:
                 invite = await context.bot.create_chat_invite_link(
                     chat_id=int(chat_id),
@@ -287,7 +285,6 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Forbidden:
                 return await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
 
-            # сохраняем ссылку и время запроса
             cur.execute("""
                 INSERT INTO last_requests(user_id, timestamp) VALUES (%s,%s)
                 ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
@@ -309,7 +306,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     )
 
-# ========================= остальной код без изменений =========================
+# ========================= info =========================
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -352,7 +349,7 @@ def add_remove_handler(command, table, column):
         await safe_send(update.message.reply_text, f"✅ {command} выполнен: {value}")
     return handler
 
-# ================= BROADCAST =================
+# ========================= ИСПРАВЛЕННАЯ РАССЫЛКА =========================
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -362,23 +359,29 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_send(update.message.reply_text, "❌ Укажите текст")
 
     text = " ".join(context.args)
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT user_id FROM users")
-            rows = cur.fetchall()
-    finally:
-        release_db(db)
+    await safe_send(update.message.reply_text, "📤 Рассылка запущена...")
 
-    sent, failed = 0, 0
-    for r in rows:
+    async def _send_messages():
+        db = get_db()
         try:
-            await safe_send(context.bot.send_message, int(r["user_id"]), text)
-            sent += 1
-        except:
-            failed += 1
-        await asyncio.sleep(0.1)
-    await safe_send(update.message.reply_text, f"✅ Рассылка завершена. Отправлено: {sent}, Ошибок: {failed}")
+            with db.cursor() as cur:
+                cur.execute("SELECT user_id FROM users")
+                rows = cur.fetchall()
+        finally:
+            release_db(db)
+
+        sent, failed = 0, 0
+        for r in rows:
+            try:
+                await safe_send(context.bot.send_message, int(r["user_id"]), text)
+                sent += 1
+            except:
+                failed += 1
+            await asyncio.sleep(0.05)
+
+        await safe_send(update.message.reply_text, f"✅ Рассылка завершена. Отправлено: {sent}, Ошибок: {failed}")
+
+    asyncio.create_task(_send_messages())
 
 # ================= CHAT PROTECT =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
