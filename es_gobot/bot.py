@@ -193,7 +193,7 @@ async def get_job_list():
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        return  # только ЛС
+        return
 
     user = update.effective_user
     log_user(user)
@@ -262,7 +262,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db()
     try:
         with db.cursor() as cur:
-            # проверяем, когда последний раз выдавалась ссылка
+            # проверяем последний запрос
             cur.execute("SELECT timestamp FROM last_requests WHERE user_id=%s", (user_id,))
             last = cur.fetchone()
             if last and now - last["timestamp"] < LINK_COOLDOWN:
@@ -272,6 +272,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"❌ Подождите {remaining // 60} мин {remaining % 60} сек перед повторным запросом."
                 )
 
+            # получаем приватный чат
             chat_id = get_setting("private_chat_id")
             if not chat_id:
                 return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
