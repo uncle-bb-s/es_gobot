@@ -193,7 +193,7 @@ async def get_job_list():
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        return  # только ЛС
+        return
 
     user = update.effective_user
     log_user(user)
@@ -262,7 +262,6 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db()
     try:
         with db.cursor() as cur:
-            # проверяем, когда последний раз выдавалась ссылка
             cur.execute("SELECT timestamp FROM last_requests WHERE user_id=%s", (user_id,))
             last = cur.fetchone()
             if last and now - last["timestamp"] < LINK_COOLDOWN:
@@ -386,29 +385,65 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= CHAT PROTECT =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
+
     if member.new_chat_member.status not in ("member", "restricted"):
         return
 
-    user_id = str(member.new_chat_member.user.id)
-    invite_link = getattr(member.invite_link, "invite_link", None)
+    user = member.new_chat_member.user
+    user_id = str(user.id)
     now = int(time.time())
 
-    db = get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("SELECT invite_link, expire FROM active_links WHERE user_id=%s", (user_id,))
-            row = cur.fetchone()
-    finally:
-        release_db(db)
-
-    if not row or invite_link != row["invite_link"] or now > row["expire"] + LINK_GRACE:
+    # 1. Боты в чат запрещены
+    if user.is_bot:
         try:
-            await context.bot.ban_chat_member(member.chat.id, int(user_id))
-            await context.bot.unban_chat_member(member.chat.id, int(user_id))
+            await context.bot.ban_chat_member(member.chat.id, user.id)
+            await context.bot.unban_chat_member(member.chat.id, user.id)
         except:
             pass
         return
 
+    invite_link_used = getattr(member.invite_link, "invite_link", None)
+
+    # 2. Проверяем, есть ли разрешение от бота
+    db = get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT invite_link, expire FROM active_links WHERE user_id=%s",
+                (user_id,)
+            )
+            row = cur.fetchone()
+    finally:
+        release_db(db)
+
+    # Нет разрешения — кик
+    if not row:
+        try:
+            await context.bot.ban_chat_member(member.chat.id, user.id)
+            await context.bot.unban_chat_member(member.chat.id, user.id)
+        except:
+            pass
+        return
+
+    # Разрешение просрочено — кик
+    if now > row["expire"] + LINK_GRACE:
+        try:
+            await context.bot.ban_chat_member(member.chat.id, user.id)
+            await context.bot.unban_chat_member(member.chat.id, user.id)
+        except:
+            pass
+        return
+
+    # Если Telegram передал ссылку — проверяем её
+    if invite_link_used and invite_link_used != row["invite_link"]:
+        try:
+            await context.bot.ban_chat_member(member.chat.id, user.id)
+            await context.bot.unban_chat_member(member.chat.id, user.id)
+        except:
+            pass
+        return
+
+    # 3. Вход успешен — сжигаем разрешение
     db = get_db()
     try:
         with db.cursor() as cur:
@@ -444,6 +479,7 @@ def main():
 
     app.add_handler(CommandHandler("broadcast", broadcast))
 
+    # CHAT PROTECT
     app.add_handler(ChatMemberHandler(protect_chat, ChatMemberHandler.CHAT_MEMBER))
 
     app.run_polling()
