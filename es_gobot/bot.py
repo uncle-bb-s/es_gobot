@@ -6,7 +6,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -88,7 +87,7 @@ def init_db():
                     url TEXT PRIMARY KEY
                 );
             """)
-        db.commit()
+            db.commit()
     finally:
         release_db(db)
 
@@ -111,7 +110,7 @@ def set_setting(key, value):
                 "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
                 (key, str(value))
             )
-        db.commit()
+            db.commit()
     finally:
         release_db(db)
 
@@ -132,12 +131,11 @@ def log_user(user):
             cur.execute("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
             if cur.fetchone():
                 return
-
             cur.execute("""
                 INSERT INTO users (user_id, username, first_name, last_name, first_used)
                 VALUES (%s,%s,%s,%s,%s)
             """, (user_id, username, first_name, last_name, now))
-        db.commit()
+            db.commit()
     finally:
         release_db(db)
 
@@ -166,7 +164,7 @@ def fetch_list(table):
         with db.cursor() as cur:
             cur.execute(f"SELECT * FROM {table}")
             rows = cur.fetchall()
-        return rows
+            return rows
     finally:
         release_db(db)
 
@@ -239,15 +237,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         caption += user_commands_hint()
 
-    if WELCOME_IMAGE:
-        await safe_send(
-            context.bot.send_photo,
-            chat_id=update.effective_chat.id,
-            photo=WELCOME_IMAGE,
-            caption=caption
-        )
-    else:
-        await safe_send(update.message.reply_text, caption)
+    await safe_send(
+        context.bot.send_photo,
+        chat_id=update.effective_chat.id,
+        photo=WELCOME_IMAGE,
+        caption=caption
+    )
 
 # ========================= /link =========================
 async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -257,43 +252,46 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
     log_user(user)
-    now = int(time.time())
 
+    now = int(time.time())
     db = get_db()
+
     try:
         with db.cursor() as cur:
             cur.execute("SELECT timestamp FROM last_requests WHERE user_id=%s", (user_id,))
             last = cur.fetchone()
+
             if last and now - last["timestamp"] < LINK_COOLDOWN:
                 remaining = LINK_COOLDOWN - (now - last["timestamp"])
                 return await safe_send(
                     update.message.reply_text,
-                    f"❌ Подождите {remaining // 60} мин {remaining % 60} сек перед повторным запросом."
+                    f"❌ Подождите {remaining // 60} мин {remaining % 60} сек."
                 )
 
             chat_id = get_setting("private_chat_id")
             if not chat_id:
                 return await safe_send(update.message.reply_text, "❌ Приватный чат не настроен.")
 
-            try:
-                invite = await context.bot.create_chat_invite_link(
-                    chat_id=int(chat_id),
-                    expire_date=now + LINK_EXPIRE,
-                    member_limit=1
-                )
-            except Forbidden:
-                return await safe_send(update.message.reply_text, "❌ Бот не администратор чата.")
+            invite = await context.bot.create_chat_invite_link(
+                chat_id=int(chat_id),
+                expire_date=now + LINK_EXPIRE,
+                member_limit=1
+            )
 
             cur.execute("""
-                INSERT INTO last_requests(user_id, timestamp) VALUES (%s,%s)
+                INSERT INTO last_requests(user_id, timestamp)
+                VALUES (%s,%s)
                 ON CONFLICT (user_id) DO UPDATE SET timestamp=EXCLUDED.timestamp
             """, (user_id, now))
+
             cur.execute("""
-                INSERT INTO active_links(user_id, invite_link, expire) VALUES (%s,%s,%s)
+                INSERT INTO active_links(user_id, invite_link, expire)
+                VALUES (%s,%s,%s)
                 ON CONFLICT (user_id) DO UPDATE
                 SET invite_link=EXCLUDED.invite_link, expire=EXCLUDED.expire
             """, (user_id, invite.invite_link, now + LINK_EXPIRE))
-        db.commit()
+
+            db.commit()
     finally:
         release_db(db)
 
@@ -310,18 +308,13 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
 
-    bots_list = await get_bots_list()
-    sites_list = await get_sites_list()
-    price_list = await get_price_list()
-    contact_list = await get_contact_list()
-    job_list = await get_job_list()
-
-    await safe_send(update.message.reply_text,
-        f"🤖 Боты:\n{bots_list}\n\n"
-        f"🌐 Сайты:\n{sites_list}\n\n"
-        f"💰 Прайс-канал:\n{price_list}\n\n"
-        f"📞 Контакт-канал:\n{contact_list}\n\n"
-        f"💼 Работа-канал:\n{job_list}"
+    await safe_send(
+        update.message.reply_text,
+        f"🤖 Боты:\n{await get_bots_list()}\n\n"
+        f"🌐 Сайты:\n{await get_sites_list()}\n\n"
+        f"💰 Прайс-канал:\n{await get_price_list()}\n\n"
+        f"📞 Контакт-канал:\n{await get_contact_list()}\n\n"
+        f"💼 Работа-канал:\n{await get_job_list()}"
     )
 
 # ================= ADMIN ADD/REMOVE =================
@@ -336,19 +329,44 @@ def add_remove_handler(command, table, column):
 
         value = context.args[0]
         db = get_db()
+
         try:
             with db.cursor() as cur:
                 if command.startswith("add"):
-                    cur.execute(f"INSERT INTO {table} ({column}) VALUES (%s) ON CONFLICT DO NOTHING", (value,))
+                    cur.execute(
+                        f"INSERT INTO {table} ({column}) VALUES (%s) ON CONFLICT DO NOTHING",
+                        (value,)
+                    )
                 else:
                     cur.execute(f"DELETE FROM {table} WHERE {column}=%s", (value,))
-            db.commit()
+                db.commit()
         finally:
             release_db(db)
+
         await safe_send(update.message.reply_text, f"✅ {command} выполнен: {value}")
+
     return handler
 
-# ========================= ИСПРАВЛЕННАЯ РАССЫЛКА =========================
+# ========================= ИСПРАВЛЕННЫЙ /setchat =========================
+async def setchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    if not context.args:
+        return await safe_send(update.message.reply_text, "❌ Укажите ID чата")
+
+    chat_id = context.args[0]
+    set_setting("private_chat_id", chat_id)
+
+    await safe_send(
+        update.message.reply_text,
+        f"✅ Приватный чат установлен: {chat_id}"
+    )
+
+# ========================= BROADCAST =========================
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -378,14 +396,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 failed += 1
             await asyncio.sleep(0.05)
 
-        await safe_send(update.message.reply_text, f"✅ Рассылка завершена. Отправлено: {sent}, Ошибок: {failed}")
+        await safe_send(
+            update.message.reply_text,
+            f"✅ Рассылка завершена. Отправлено: {sent}, Ошибок: {failed}"
+        )
 
     asyncio.create_task(_send_messages())
 
 # ================= CHAT PROTECT =================
 async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
-
     if member.new_chat_member.status not in ("member", "restricted"):
         return
 
@@ -393,7 +413,6 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
     now = int(time.time())
 
-    # 1. Боты в чат запрещены
     if user.is_bot:
         try:
             await context.bot.ban_chat_member(member.chat.id, user.id)
@@ -404,7 +423,6 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     invite_link_used = getattr(member.invite_link, "invite_link", None)
 
-    # 2. Проверяем, есть ли разрешение от бота
     db = get_db()
     try:
         with db.cursor() as cur:
@@ -416,8 +434,7 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         release_db(db)
 
-    # Нет разрешения — кик
-    if not row:
+    if not row or now > row["expire"] + LINK_GRACE:
         try:
             await context.bot.ban_chat_member(member.chat.id, user.id)
             await context.bot.unban_chat_member(member.chat.id, user.id)
@@ -425,16 +442,6 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # Разрешение просрочено — кик
-    if now > row["expire"] + LINK_GRACE:
-        try:
-            await context.bot.ban_chat_member(member.chat.id, user.id)
-            await context.bot.unban_chat_member(member.chat.id, user.id)
-        except:
-            pass
-        return
-
-    # Если Telegram передал ссылку — проверяем её
     if invite_link_used and invite_link_used != row["invite_link"]:
         try:
             await context.bot.ban_chat_member(member.chat.id, user.id)
@@ -443,19 +450,24 @@ async def protect_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # 3. Вход успешен — сжигаем разрешение
     db = get_db()
     try:
         with db.cursor() as cur:
             cur.execute("DELETE FROM active_links WHERE user_id=%s", (user_id,))
-        db.commit()
+            db.commit()
     finally:
         release_db(db)
 
 # ================= MAIN =================
 def main():
     global DB_POOL
-    DB_POOL = SimpleConnectionPool(1, 20, dsn=DATABASE_URL, cursor_factory=RealDictCursor)
+
+    DB_POOL = SimpleConnectionPool(
+        1, 20,
+        dsn=DATABASE_URL,
+        cursor_factory=RealDictCursor
+    )
+
     init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -466,7 +478,8 @@ def main():
     app.add_handler(CommandHandler("info", info))
 
     # ADMIN
-    app.add_handler(CommandHandler("setchat", lambda u,c: set_setting("private_chat_id", c.args[0]) if is_admin(u.effective_user.id) else None))
+    app.add_handler(CommandHandler("setchat", setchat))
+
     tables = [
         ("addbot","bots","username"), ("removebot","bots","username"),
         ("addsite","sites","url"), ("removesite","sites","url"),
@@ -474,6 +487,7 @@ def main():
         ("addcontact","contact_channels","url"), ("removecontact","contact_channels","url"),
         ("addjob","job_channels","url"), ("removejob","job_channels","url"),
     ]
+
     for cmd, table, col in tables:
         app.add_handler(CommandHandler(cmd, add_remove_handler(cmd, table, col)))
 
