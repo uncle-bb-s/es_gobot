@@ -25,7 +25,7 @@ LINK_COOLDOWN = 1800
 LINK_GRACE = 10
 LINK_LOCK_SECONDS = 3
 
-WELCOME_IMAGE = "https://image2url.com/r2/default/images/1768635379388-0769fe79-f5b5-4926-97dc-a20e7be08fe0.jpg"
+WELCOME_IMAGE = "https://image2url.com/r2/default/images/1769954121038-a6517e21-52cd-4d74-86c1-6b8b8fcfb5d3.jpg"
 
 if not BOT_TOKEN or not DATABASE_URL:
     raise RuntimeError("❌ BOT_TOKEN или DATABASE_URL не заданы")
@@ -500,3 +500,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
